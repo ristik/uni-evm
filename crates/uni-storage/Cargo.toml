@@ -1,0 +1,30 @@
+[package]
+name = "uni-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Ethrex storage
+ethrex-storage.workspace = true
+ethrex-common.workspace = true
+ethereum-types.workspace = true
+
+# BFT types
+uni-bft-committer.workspace = true
+
+# Persistent storage
+rocksdb.workspace = true
+
+# Serialization
+ciborium = "0.2"
+
+# Common utilities
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

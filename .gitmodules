@@ -1,0 +1,3 @@
+[submodule "ethrex"]
+	path = ethrex
+	url = https://github.com/lambdaclass/ethrex.git

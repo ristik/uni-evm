@@ -1,0 +1,117 @@
+[workspace]
+members = [
+    "cmd/uni-evm",
+    "crates/bft-committer",
+    "crates/bft-precompile",
+    "crates/uni-sequencer",
+    "crates/uni-storage",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Unicity Labs"]
+documentation = "https://github.com/ristik/uni-evm"
+
+[workspace.dependencies]
+# Ethrex crates (from submodule)
+ethrex-blockchain = { path = "./ethrex/crates/blockchain", default-features = false }
+ethrex-common = { path = "./ethrex/crates/common", default-features = false }
+ethrex-config = { path = "./ethrex/crates/common/config" }
+ethrex-rpc = { path = "./ethrex/crates/networking/rpc" }
+ethrex-storage = { path = "./ethrex/crates/storage", features = ["rocksdb"] }
+ethrex-vm = { path = "./ethrex/crates/vm", default-features = false }
+ethrex-levm = { path = "./ethrex/crates/vm/levm", features = ["uni-evm-precompile"] }
+ethrex-trie = { path = "./ethrex/crates/common/trie" }
+ethrex-rlp = { path = "./ethrex/crates/common/rlp" }
+ethrex-crypto = { path = "./ethrex/crates/common/crypto" }
+ethrex-l2-common = { path = "./ethrex/crates/l2/common" }
+ethrex-l2-rpc = { path = "./ethrex/crates/l2/networking/rpc" }
+ethrex-prover-lib = { path = "./ethrex/crates/l2/prover", package = "ethrex-prover" }
+guest_program = { path = "./ethrex/crates/l2/prover/src/guest_program" }
+ethrex-storage-rollup = { path = "./ethrex/crates/l2/storage" }
+ethrex-threadpool = { path = "./ethrex/crates/concurrency" }
+ethrex-metrics = { path = "./ethrex/crates/blockchain/metrics" }
+ethrex-p2p = { path = "./ethrex/crates/networking/p2p" }
+ethrex-dev = { path = "./ethrex/crates/blockchain/dev", default-features = false }
+ethrex-sdk = { path = "./ethrex/crates/l2/sdk" }
+
+# Ethrex required dependencies (from ethrex workspace)
+rustc-hash = "2.1.1"
+async-trait = "0.1.88"
+serde_with = "3.11.0"
+hex-literal = "0.4.1"
+crc32fast = "1.4.2"
+lazy_static = "1.5.0"
+sha2 = "0.10.9"
+sha3 = "0.10.8"
+tokio-util = { version = "0.7.15", features = ["rt"] }
+jsonwebtoken = "9.3.0"
+reqwest = { version = "0.12.7", features = ["socks", "json"] }
+snap = "1.1.1"
+rustc-hex = "2.1.0"
+url = { version = "2.5.4", features = ["serde"] }
+futures = "0.3.31"
+spawned-concurrency = "0.4.2"
+spawned-rt = "0.4.2"
+crossbeam = "0.8.4"
+rayon = "1.10.0"
+tempfile = "3.8"
+indexmap = "2.11.4"
+k256 = "0.13.4"
+eyre = "0.6.12"
+clap_complete = "4.5.17"
+kzg-rs = "0.2.6"
+libsql = "0.9.10"
+aligned-sdk = { git = "https://github.com/yetanotherco/aligned_layer", rev = "c60d7eb147edbdf12bb7a7c6e92ec178d9f8da23" }
+lambdaworks-crypto = "0.13.0"
+tui-logger = { version = "0.17.3", features = ["tracing-support"] }
+rkyv = { version = "0.8.10", features = ["std", "unaligned"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+tower-http = { version = "0.6.2", features = ["cors"] }
+rocksdb = { version = "0.24.0", default-features = false, features = ["bindgen-runtime", "lz4"] }
+axum = "0.8.1"
+
+# Uni-EVM crates
+uni-bft-committer = { path = "./crates/bft-committer" }
+uni-bft-precompile = { path = "./crates/bft-precompile" }
+uni-sequencer = { path = "./crates/uni-sequencer" }
+uni-storage = { path = "./crates/uni-storage" }
+
+# Common dependencies
+tokio = { version = "1.41", features = ["full"] }
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3.0", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+bytes = { version = "1.6", features = ["serde"] }
+hex = "0.4"
+clap = { version = "4.3", features = ["derive", "env"] }
+
+# BFT Core integration
+ciborium = "0.2"
+libp2p = { version = "0.54", features = ["tcp", "tokio", "noise", "yamux", "request-response", "cbor", "secp256k1", "identify"] }
+secp256k1 = { version = "0.30", features = ["global-context", "recovery", "rand"] }
+
+# Ethrex shared dependencies
+ethereum-types = { version = "0.15.1", features = ["serialize"] }
+rand = "0.8"
+
+[profile.dev]
+debug = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.release-with-debug]
+inherits = "release"
+debug = 2
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

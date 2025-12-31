@@ -1,0 +1,54 @@
+[package]
+name = "uni-evm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "uni-evm"
+path = "src/main.rs"
+
+[[bin]]
+name = "get-peer-id"
+path = "src/bin/get_peer_id.rs"
+
+[[bin]]
+name = "get-signing-pubkey"
+path = "src/bin/get_signing_pubkey.rs"
+
+[dependencies]
+# Ethrex core
+ethrex-blockchain.workspace = true
+ethrex-common.workspace = true
+ethrex-config.workspace = true
+ethrex-storage.workspace = true
+ethrex-vm.workspace = true
+ethrex-rpc.workspace = true
+ethrex-l2-rpc.workspace = true
+ethrex-p2p.workspace = true
+ethereum-types.workspace = true
+
+# Uni-EVM crates
+uni-bft-committer.workspace = true
+uni-bft-precompile.workspace = true
+uni-sequencer.workspace = true
+uni-storage.workspace = true
+
+# Common utilities
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap = { version = "4.3", features = ["derive"] }
+hex.workspace = true
+libp2p.workspace = true
+secp256k1.workspace = true
+bytes.workspace = true
+toml = "0.8"
+axum.workspace = true
+tower-http.workspace = true
+rand.workspace = true
+
+[dev-dependencies]

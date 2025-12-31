@@ -1,0 +1,59 @@
+# Uni-EVM Configuration Example
+
+[network]
+partition_id = 8
+shard_id = 128  # 0x80 (empty bitstring = default shard)
+node_id = "uni-evm-node-1"
+chain_id = 1
+genesis_file_path = "./genesis.json"
+
+[bft_core]
+# List of BFT Core root chain peer IDs (libp2p peer IDs)
+root_chain_peers = []
+
+# List of BFT Core root chain multiaddrs (full libp2p addresses)
+# Format: /ip4/HOST/tcp/PORT/p2p/PEER_ID
+# Example: ["/ip4/127.0.0.1/tcp/26662/p2p/12D3KooW..."]
+root_chain_addrs = []
+
+# libp2p listen address for BFT Core communication
+libp2p_listen_addr = "/ip4/0.0.0.0/tcp/9000"
+
+# Path to secp256k1 signing key
+signing_key_path = "./keys/signing.key"
+
+[prover]
+# Prover type: sp1, risc0, etc.
+prover_type = "sp1"
+
+# Proof format: compressed (recommended) or groth16
+proof_format = "compressed"
+
+# Optional: Remote prover endpoint
+# prover_endpoint = "http://localhost:8080"
+
+[sequencer]
+# Block production interval in milliseconds
+block_time_ms = 1000
+
+# Maximum gas per block
+gas_limit = 30000000
+
+[rpc]
+# HTTP RPC server address
+http_addr = "127.0.0.1"
+
+# HTTP RPC port (default Ethereum port)
+http_port = 8545
+
+[trust_base]
+# BFT Core REST API endpoint (optional, for dynamic trust base updates)
+# Example: "http://localhost:25866"
+bft_core_endpoint = ""
+
+# Path to trust-base.json file (fallback if REST API not available)
+# This file contains the validator public keys for signature verification
+filesystem_path = "./trust-base.json"
+
+# Update interval in seconds (how often to refresh trust base from BFT Core)
+update_interval_secs = 300
