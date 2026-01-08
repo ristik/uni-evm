@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use uni_sequencer::ProverBackend;
 
 /// Main configuration for Uni-EVM node
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +51,55 @@ pub struct ProverConfig {
     pub proof_format: String,
     /// Optional remote prover endpoint
     pub prover_endpoint: Option<String>,
+}
+
+impl ProverConfig {
+    /// Parse prover_type string to ProverBackend enum
+    ///
+    /// This maps the configuration string to our custom backend:
+    /// - "exec" → ProverBackend::Exec (dummy proofs for testing)
+    /// - "sp1" → ProverBackend::Sp1 (real SP1 ZK proofs)
+    ///
+    /// Returns an error if:
+    /// - prover_type is unknown
+    /// - prover_type is "sp1" but the sp1 feature is not enabled
+    pub fn get_backend(&self) -> Result<ProverBackend> {
+        match self.prover_type.to_lowercase().as_str() {
+            "exec" => Ok(ProverBackend::Exec),
+
+            #[cfg(feature = "sp1")]
+            "sp1" => Ok(ProverBackend::Sp1),
+
+            #[cfg(not(feature = "sp1"))]
+            "sp1" => Err(anyhow::anyhow!(
+                "SP1 backend not available. Rebuild with --features sp1"
+            )),
+
+            _ => Err(anyhow::anyhow!(
+                "Unknown prover_type: '{}'. Valid options: exec, sp1",
+                self.prover_type
+            )),
+        }
+    }
+
+    /// Get the proof format
+    ///
+    /// For BFT-Core integration, only "compressed" format is supported.
+    /// Groth16 wrapping is not needed since BFT-Core verifies SP1 proofs directly.
+    pub fn get_proof_format(&self) -> Result<ethrex_l2_common::prover::ProofFormat> {
+        use ethrex_l2_common::prover::ProofFormat;
+
+        match self.proof_format.to_lowercase().as_str() {
+            "compressed" => Ok(ProofFormat::Compressed),
+            "groth16" => Err(anyhow::anyhow!(
+                "Groth16 format not supported. BFT-Core requires 'compressed' format"
+            )),
+            _ => Err(anyhow::anyhow!(
+                "Unknown proof_format: '{}'. Must be 'compressed'",
+                self.proof_format
+            )),
+        }
+    }
 }
 
 /// Sequencer configuration

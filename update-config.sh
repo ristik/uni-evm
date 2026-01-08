@@ -120,7 +120,7 @@ filesystem_path = "./test-nodes/trust-base.json"
 bft_core_endpoint = "http://localhost:25866"
 
 # Update interval in seconds (how often to refresh trust base)
-update_interval_secs = 300
+update_interval_secs = 3600
 
 EOF
 

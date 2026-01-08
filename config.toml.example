@@ -33,7 +33,7 @@ proof_format = "compressed"
 # prover_endpoint = "http://localhost:8080"
 
 [sequencer]
-# Block production interval in milliseconds
+# Transaction collection wait in milliseconds (t1 in spec)
 block_time_ms = 1000
 
 # Maximum gas per block
@@ -56,4 +56,4 @@ bft_core_endpoint = ""
 filesystem_path = "./trust-base.json"
 
 # Update interval in seconds (how often to refresh trust base from BFT Core)
-update_interval_secs = 300
+update_interval_secs = 3600

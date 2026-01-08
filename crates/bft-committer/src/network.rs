@@ -348,12 +348,9 @@ impl BftCoreClient {
         let uc_for_callback = uc.clone();
         let technical_for_callback = technical.clone();
 
-        // Store the UC
         self.uc_storage.store_uc(uc)?;
 
-        // Call the merged UC+TechnicalRecord callback if set
         if let Some(ref callback) = self.uc_callback {
-            info!("Invoking UC callback for round {} with TechnicalRecord (next_round={})", round, technical_for_callback.round);
             if let Err(e) = callback(uc_for_callback, technical_for_callback) {
                 error!("UC callback failed: {}", e);
             }
@@ -409,7 +406,6 @@ impl BftCoreClient {
                         // Attempt to deserialize the CertificationResponse
                         match self.handle_certification_response(&request) {
                             Ok(()) => {
-                                info!("✓ CertificationResponse / UC handled");
                             }
                             Err(e) => {
                                 error!("Failed to deserialize UC: {}", e);

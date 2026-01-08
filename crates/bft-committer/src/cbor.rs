@@ -82,7 +82,6 @@ pub fn deserialize_certification_response(data: &[u8]) -> Result<crate::types::C
     let technical: TechnicalRecord = ciborium::from_reader(&tr_bytes[..])?;
 
     // Extract UnicityCertificate (handle CBOR tags recursively)
-    tracing::info!("Deserializing UC from CBOR array element 3");
     let uc_value = strip_tags_recursive(&arr[3]);
     let mut uc_bytes = Vec::new();
     ciborium::into_writer(&uc_value, &mut uc_bytes)?;

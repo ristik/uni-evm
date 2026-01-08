@@ -27,7 +27,7 @@ NC='\033[0m' # No Color
 NETWORK_ID=3  # Must match genesis.json and trust base
 PARTITION_ID=8
 PARTITION_TYPE_ID=8
-T2_TIMEOUT=300000  # 50 minutes in milliseconds (BFT Core expects milliseconds)
+T2_TIMEOUT=900000  # 15 minutes in milliseconds (BFT Core expects milliseconds)
 EPOCH_START=10
 
 # Directories
@@ -170,7 +170,7 @@ generate_shard_config() {
         echo "  Generating configuration..."
         echo "    Partition ID: $PARTITION_ID"
         echo "    Partition Type: $PARTITION_TYPE_ID"
-        echo "    T2 Timeout: 60s"
+        echo "    T2 Timeout: $T2_TIMEOUT ms"
         echo "    Epoch Start: $EPOCH_START"
 
         $BFT_BUILD shard-conf generate \
@@ -212,6 +212,9 @@ copy_config_to_root() {
     echo "  Copying shard-conf-${PARTITION_ID}_0.json to $BFT_ROOT_DIR/..."
     cp "$GENESIS_DIR/shard-conf-${PARTITION_ID}_0.json" "$BFT_ROOT_DIR/"
 
+    echo "  Copying ethrex-vkey.bin to $BFT_ROOT_DIR/..."
+    cp ethrex-vkey.bin "$BFT_ROOT_DIR/uni-evm-vkey.bin"
+
     echo -e "${GREEN}✓ Configuration copied${NC}"
     echo ""
 }
@@ -236,7 +239,8 @@ start_root_node() {
         --address "/ip4/127.0.0.1/tcp/$ROOT_P2P_PORT" \
         --trust-base "$GENESIS_DIR/trust-base.json" \
         --rpc-server-address "localhost:$ROOT_RPC_PORT" \
-        --log-level WARN --log-format text --log-file bft-root.log \
+        --log-level DEBUG --log-format text --log-file bft-root.log \
+        --zk-verification-enabled=true --zk-vkey-path="$BFT_ROOT_DIR/uni-evm-vkey.bin" \
         > ./bft-root.out 2>&1 &
 
     ROOT_PID=$!

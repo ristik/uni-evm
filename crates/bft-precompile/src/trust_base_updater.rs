@@ -111,7 +111,7 @@ impl Default for TrustBaseUpdateConfig {
         Self {
             bft_core_endpoint: None,
             filesystem_path: Some("./trust-base.json".to_string()),
-            update_interval_secs: 300, // 5 minutes
+            update_interval_secs: 60*60, // 1 hour
             request_timeout_secs: 10,
         }
     }

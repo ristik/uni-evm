@@ -7,8 +7,11 @@ pub mod block_producer;
 pub mod proof_coordinator;
 pub mod block_finalizer;
 
+#[cfg(feature = "sp1")]
+pub mod sp1_prover;
+
 pub use block_producer::{BlockProducer, BlockProducerConfig, BlockProduced};
-pub use proof_coordinator::{ProofCoordinator, ProofCoordinatorConfig};
+pub use proof_coordinator::{ProofCoordinator, ProofCoordinatorConfig, ProverBackend};
 pub use block_finalizer::{
     BlockFinalizer, BlockFinalizerHandle, BlockFinalized, PendingBlock, create_block_finalizer,
 };

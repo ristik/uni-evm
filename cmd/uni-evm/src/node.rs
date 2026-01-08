@@ -383,11 +383,31 @@ impl UniEvmNode {
         // Wait for connections to establish
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-        // Get genesis UC (round 0) BEFORE creating BftCommitter
-        // Load genesis UC from storage if available (for initialization only)
-        info!("Checking for genesis UC (round 0) in storage...");
-        let genesis_uc: Option<UnicityCertificate> = if uni_store.has_unicity_certificate(0) {
-            info!("✓ Genesis UC (round 0) already in storage from previous run");
+        // Load last UC from storage for committer initialization
+        // On restart, we should use the last UC, not genesis
+        info!("Loading last UC from storage for initialization...");
+        let last_uc: Option<UnicityCertificate> = if last_certified_block > 0 {
+            // Restart scenario: use last certified block's UC
+            info!("✓ Found last certified block {} - loading its UC", last_certified_block);
+            match uni_store.get_unicity_certificate(last_certified_block) {
+                Ok(uc) => {
+                    let state = uc.input_record
+                        .as_ref()
+                        .and_then(|ir| ir.hash.as_ref())
+                        .map(|h| hex::encode(&h[..32.min(h.len())]))
+                        .unwrap_or_else(|| "none".to_string());
+                    info!("  Last UC round: {}, state hash: {}", last_certified_block, state);
+                    Some(uc)
+                }
+                Err(e) => {
+                    warn!("Failed to load UC for block {}: {}", last_certified_block, e);
+                    warn!("Will sync from BFT Core instead");
+                    None
+                }
+            }
+        } else if uni_store.has_unicity_certificate(0) {
+            // Genesis UC exists, use it
+            info!("✓ Genesis UC (round 0) found in storage");
             let uc = uni_store.get_unicity_certificate(0)
                 .context("Failed to read genesis UC from storage")?;
             let genesis_state = uc.input_record
@@ -396,10 +416,9 @@ impl UniEvmNode {
                 .map(|h| hex::encode(&h[..32.min(h.len())]))
                 .unwrap_or_else(|| "none".to_string());
             info!("  Genesis state hash: {}", genesis_state);
-            info!("  NOTE: Genesis UC may be stale - will subscribe to UC feed for latest state");
             Some(uc)
         } else {
-            info!("Genesis UC not found in storage - will subscribe to UC feed");
+            info!("No UC in storage - first run, will subscribe to UC feed");
             None
         };
 
@@ -416,17 +435,12 @@ impl UniEvmNode {
         let bft_committer = Arc::new(Mutex::new(BftCommitter::new(
             committer_config,
             bft_handle.clone(),
-            genesis_uc,  // Pass genesis UC for round state initialization
+            last_uc,  // Pass last UC for round state initialization (not just genesis)
         )));
 
         // Store committer reference for UC callback
         *bft_committer_ref.lock().await = Some(bft_committer.clone());
 
-        // CRITICAL: Subscribe to UC feed via Handshake BEFORE starting block production
-        // This ensures we have the latest UC from BFT Core (not stale genesis)
-        info!("========================================");
-        info!("📡 SUBSCRIBING TO UC FEED");
-        info!("========================================");
         info!("Sending handshake to BFT Core to subscribe to UC feed...");
         info!("  Partition ID: {}", self.config.network.partition_id);
         info!("  BFT Node ID:  {}", self.config.network.node_id);
@@ -490,29 +504,9 @@ impl UniEvmNode {
             } else {
                 (0, 0)
             };
-
-            info!("========================================");
-            info!("✓ UC FEED SUBSCRIPTION SUCCESSFUL");
-            info!("========================================");
-            info!("Received UC from BFT Core:");
-            info!("  UC round:     {}", uc_round);
-            info!("  Next round:   {} (from TechnicalRecord)", next_round);
-            info!("========================================");
-            info!("Ready to produce blocks synchronized with BFT Core!");
+            info!("Received UC from BFT Core: round {}, next expected round {}", uc_round, next_round);
         } else {
-            warn!("========================================");
-            warn!("⚠️  UC FEED HANDSHAKE TIMEOUT");
-            warn!("========================================");
             warn!("No UC received from handshake within timeout");
-            warn!("This is expected if:");
-            warn!("  1. BFT Core handshake protocol not fully implemented");
-            warn!("  2. Using configuration-based registration instead");
-            warn!("========================================");
-            info!("✓ CONTINUING WITH CONFIGURATION-BASED REGISTRATION");
-            info!("  Peer ID is registered in shard configuration");
-            info!("  Will receive UCs in response to block certification requests");
-            info!("  Starting block production...");
-            warn!("========================================");
         }
 
         // Certify genesis state (block 0) before producing first transaction block
@@ -613,7 +607,7 @@ impl UniEvmNode {
         let root_chain_peer_for_heartbeat = root_chain_peer;
         let partition_id_for_heartbeat = self.config.network.partition_id;
         let node_id_for_heartbeat = self.config.network.node_id.clone();  // Use BFT node ID
-        let handshake_interval_secs = 30;
+        let handshake_interval_secs = 30*60;
 
         info!("Handshake will be re-sent every {} seconds", handshake_interval_secs);
         info!("This ensures UC feed subscription remains active");
@@ -637,7 +631,7 @@ impl UniEvmNode {
                 ).await {
                     warn!("Failed to send periodic handshake: {}", e);
                 } else {
-                    info!("✓ Periodic handshake sent successfully");
+                    // info!("✓ Periodic handshake sent successfully");
                 }
             }
         });
@@ -665,7 +659,19 @@ impl UniEvmNode {
 
         // 8. Initialize Proof Coordinator
         info!("Initializing Proof Coordinator...");
-        let proof_coordinator_config = ProofCoordinatorConfig::default();
+        let proof_coordinator_config = ProofCoordinatorConfig {
+            proof_format: self
+                .config
+                .prover
+                .get_proof_format()
+                .context("Failed to parse proof_format from config")?,
+            prover_backend: self
+                .config
+                .prover
+                .get_backend()
+                .context("Failed to parse prover_type from config")?,
+            elasticity_multiplier: 2, // Standard EIP-1559 value
+        };
 
         let proof_coordinator = ProofCoordinator::new(
             proof_coordinator_config,
@@ -717,7 +723,6 @@ impl UniEvmNode {
             }
         });
 
-        info!("✅ Uni-EVM node fully initialized and running!");
         info!("Block production: {}ms interval", self.config.sequencer.block_time_ms);
         info!("Gas limit: {}", self.config.sequencer.gas_limit);
         info!("RPC server: http://{}", rpc_addr);

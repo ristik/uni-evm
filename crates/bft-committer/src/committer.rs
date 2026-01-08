@@ -164,12 +164,19 @@ impl BftCommitter {
         debug!("  timestamp: {}", input_record.timestamp);
 
         // Create certification request with ZK proof
+        // For genesis blocks (no previous state), proof should be None
+        let zk_proof_opt = if zk_proof.is_empty() {
+            None // Genesis block or sync request - no proof
+        } else {
+            Some(zk_proof.clone()) // Normal block with proof
+        };
+
         let mut cert_request = BlockCertificationRequest {
             partition_id: self.config.partition_id,
             shard_id: self.config.shard_id.clone(),
             node_id: self.config.node_id.clone(),
             input_record,
-            zk_proof: Some(zk_proof.clone()), // ZK proof for state transition validation
+            zk_proof: zk_proof_opt, // ZK proof for state transition validation (None for genesis)
             block_size: zk_proof.len() as u64,
             state_size: 0, // TODO: Calculate actual state size
             signature: None,  // Will be filled after signing

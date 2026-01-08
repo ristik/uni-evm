@@ -31,8 +31,6 @@ impl UcStorage {
             .ok_or_else(|| anyhow::anyhow!("UC missing InputRecord"))?
             .round_number;
 
-        info!("Storing UC for round {}", round);
-
         // Update certificates map
         {
             let mut certs = self.certificates.write()

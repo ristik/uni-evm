@@ -4,15 +4,24 @@
 //! Unlike ethrex which batches multiple blocks, uni-evm generates one proof per block.
 
 use crate::block_producer::BlockProduced;
+use ethrex_common::H256;
 use ethrex_storage::Store;
 use ethrex_l2_common::prover::ProofFormat;
-use ethrex_prover_lib::backend::Backend;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 use uni_bft_committer::BftCommitter;
 use uni_storage::UniStore;
+
+/// Prover backend type for uni-evm
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProverBackend {
+    /// Exec mode - dummy proofs for testing
+    Exec,
+    /// SP1 mode - real ZK proofs
+    Sp1,
+}
 
 #[derive(Debug, Error)]
 pub enum ProofCoordinatorError {
@@ -37,8 +46,8 @@ impl From<ethrex_storage::error::StoreError> for ProofCoordinatorError {
 pub struct ProofCoordinatorConfig {
     /// Proof format (Compressed for BFT Core)
     pub proof_format: ProofFormat,
-    /// Prover backend (SP1, RISC0, etc.)
-    pub prover_backend: Backend,
+    /// Prover backend (Exec or Sp1)
+    pub prover_backend: ProverBackend,
     /// Elasticity multiplier for EIP-1559
     pub elasticity_multiplier: u64,
 }
@@ -48,9 +57,9 @@ impl Default for ProofCoordinatorConfig {
         Self {
             proof_format: ProofFormat::Compressed, // No Groth16 wrapping
             #[cfg(feature = "sp1")]
-            prover_backend: Backend::SP1,
+            prover_backend: ProverBackend::Sp1,
             #[cfg(not(feature = "sp1"))]
-            prover_backend: Backend::Exec, // Fallback if SP1 not enabled
+            prover_backend: ProverBackend::Exec, // Fallback if SP1 not enabled
             elasticity_multiplier: 2, // Standard EIP-1559 value
         }
     }
@@ -127,29 +136,52 @@ impl ProofCoordinator {
 
         debug!("Fetched block {} for proving", block_number);
 
-        // 2. Generate SP1 proof
-        let proof_bytes = self.generate_proof(&block, &block_info).await?;
+        // 2. Check if this is genesis block (no previous UC available, h' = nil)
+        let is_genesis = block_info.parent_state_root == H256::zero();
+        // let is_genesis = if block_number == 0 {
+        //     // Block 0: check if we have a genesis UC (round 0)
+        //     // self.uni_store.get_unicity_certificate(0).is_err()
+        //     self.uni_store.get_unicity_certificate(0).is_err()
+        // } else {
+        //     // Block N>0: check if we have UC from previous round
+        //     self.uni_store.get_unicity_certificate(block_number - 1).is_err()
+        // };
 
-        info!(
-            "Generated proof for block {} ({} bytes)",
-            block_number,
-            proof_bytes.len()
-        );
+        let proof_bytes = if is_genesis {
+            info!("⭐ Genesis block {} - skipping proof generation (no previous state)", block_number);
+            vec![] // Empty proof for genesis
+        } else {
+            // 3. Generate SP1 proof for non-genesis blocks
+            let proof = self.generate_proof(&block, &block_info).await?;
+            info!(
+                "Generated proof for block {} ({} bytes)",
+                block_number,
+                proof.len()
+            );
+            proof
+        };
 
-        // 3. Store proof
+        // 4. Store proof (empty for genesis)
         self.uni_store
             .store_proof(block_number, proof_bytes.clone())
             .map_err(|e| ProofCoordinatorError::StorageError(e.to_string()))?;
 
-        // 4. Submit to BFT Core L1 (fire-and-forget)
+        // 5. Submit to BFT Core L1 (fire-and-forget)
         // The UnicityCertificate will be received asynchronously via callback
         self.submit_to_l1(block_number, block_info, proof_bytes)
             .await?;
 
-        info!(
-            "Block {} proof generated and submitted to BFT Core",
-            block_number
-        );
+        if is_genesis {
+            info!(
+                "Block {} (genesis) submitted to BFT Core without proof",
+                block_number
+            );
+        } else {
+            info!(
+                "Block {} proof generated and submitted to BFT Core",
+                block_number
+            );
+        }
 
         Ok(())
     }
@@ -161,14 +193,34 @@ impl ProofCoordinator {
         _block_info: &BlockProduced,
     ) -> Result<Vec<u8>, ProofCoordinatorError> {
         use guest_program::input::ProgramInput;
-        use ethrex_prover_lib::{prove, to_batch_proof};
+        use ethrex_prover_lib::backend::Backend;
         use ethrex_common::types::fee_config::FeeConfig;
-
-        info!("Generating SP1 proof for block {}", block.header.number);
 
         // 1. Generate execution witness
         // The witness contains all state data needed for stateless execution inside the zkVM
         let blocks = vec![block.clone()];
+
+        info!(
+            "Block {} details: {} transactions, {} ommers, gas_used: {}, gas_limit: {}",
+            block.header.number,
+            block.body.transactions.len(),
+            block.body.ommers.len(),
+            block.header.gas_used,
+            block.header.gas_limit
+        );
+
+        // Log transaction details
+        for (i, tx) in block.body.transactions.iter().enumerate() {
+            info!(
+                "  Transaction {}: to={:?}, value={}, gas_limit={}, input_len={}",
+                i,
+                tx.to(),
+                tx.value(),
+                tx.gas_limit(),
+                tx.data().len()
+            );
+        }
+
         let execution_witness = self
             .blockchain
             .generate_witness_for_blocks(&blocks)
@@ -187,7 +239,11 @@ impl ProofCoordinator {
             execution_witness.keys.len()
         );
 
-        // 2. Prepare ProverInputData
+        for (i, code) in execution_witness.codes.iter().enumerate().take(5) {
+            debug!("  Code {}: size={} bytes", i, code.len());
+        }
+
+        // 2. Prepare ProgramInput
         let program_input = ProgramInput {
             blocks: vec![block.clone()],
             execution_witness,
@@ -197,50 +253,65 @@ impl ProofCoordinator {
             blob_proof: [0; 48],
         };
 
-        info!(
-            "Prepared program input for block {}, proving with {:?}",
-            block.header.number, self.config.prover_backend
-        );
+        // 3. Generate proof based on backend
+        match self.config.prover_backend {
+            ProverBackend::Exec => {
+                // Exec backend: dummy proofs for testing
+                warn!(
+                    "Using Exec backend for block {} - generating dummy proof",
+                    block.header.number
+                );
+                Ok(vec![0xDE, 0xAD, 0xBE, 0xEF])
+            }
 
-        // 3. Generate the proof using ethrex's prove function
-        // This calls the appropriate backend (SP1, RISC0, etc.) based on prover_backend
-        let proof_output = prove(
-            self.config.prover_backend,
-            program_input,
-            self.config.proof_format,
-        )
-        .map_err(|e| {
-            ProofCoordinatorError::ProverError(format!("Failed to generate proof: {}", e))
-        })?;
+            #[cfg(feature = "sp1")]
+            ProverBackend::Sp1 => {
+                info!(
+                    "Generating SP1 proof for block {} using ethrex SP1 backend",
+                    block.header.number
+                );
 
-        info!(
-            "Generated raw proof for block {}, converting to batch proof format",
-            block.header.number
-        );
+                // Use ethrex's proven SP1 backend which works with rkyv
+                use ethrex_prover_lib::backend::sp1::prove;
+                use ethrex_l2_common::prover::ProofFormat;
 
-        // 4. Convert to BatchProof (contains proof bytes + other metadata)
-        let batch_proof = to_batch_proof(proof_output, self.config.proof_format).map_err(|e| {
-            ProofCoordinatorError::ProverError(format!("Failed to convert to batch proof: {}", e))
-        })?;
+                let proof_output = prove(program_input, ProofFormat::Compressed).map_err(|e| {
+                    ProofCoordinatorError::ProverError(format!("SP1 proving failed: {}", e))
+                })?;
 
-        // 5. Extract proof bytes (use compressed format or dummy for Exec backend)
-        let proof_bytes = batch_proof
-            .compressed()
-            .unwrap_or_else(|| {
-                // Exec backend doesn't generate actual proofs, use dummy bytes
-                warn!("No compressed proof available (using Exec backend), generating dummy proof bytes");
-                vec![0xDE, 0xAD, 0xBE, 0xEF] // 4-byte dummy proof
-            });
+                // Extract public values (should contain state roots)
+                let public_values = proof_output.proof.public_values.to_vec();
+                info!(
+                    "Generated SP1 proof for block {}: {} public value bytes",
+                    block.header.number,
+                    public_values.len()
+                );
 
-        info!(
-            "Successfully generated proof for block {} ({} bytes, format: {:?})",
-            block.header.number,
-            proof_bytes.len(),
-            self.config.proof_format
-        );
+                // Serialize proof for BFT-Core (bincode format)
+                let proof_bytes = bincode::serialize(&proof_output.proof).map_err(|e| {
+                    ProofCoordinatorError::ProverError(format!(
+                        "Failed to serialize proof: {}",
+                        e
+                    ))
+                })?;
 
-        // 6. Return the proof bytes
-        Ok(proof_bytes)
+                info!(
+                    "Serialized SP1 proof: {} bytes total",
+                    proof_bytes.len()
+                );
+
+                Ok(proof_bytes)
+            }
+
+            // Note: Backend::SP1 case is only available with sp1 feature enabled
+            // If sp1 is not enabled, get_backend() in config.rs will return an error
+            // before we reach this code, so we don't need a fallback case here.
+
+            _ => Err(ProofCoordinatorError::ProverError(format!(
+                "Unsupported backend: {:?}",
+                self.config.prover_backend
+            ))),
+        }
     }
 
     /// Submit proof to BFT Core L1

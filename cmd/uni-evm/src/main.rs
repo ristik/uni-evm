@@ -43,6 +43,13 @@ enum Command {
         #[arg(short, long)]
         key: String,
     },
+    #[cfg(feature = "sp1")]
+    /// Extract SP1 verification key for BFT-Core deployment
+    ExtractVkey {
+        /// Path to save the verification key (default: ./uni-evm-vkey.bin)
+        #[arg(short, long, default_value = "./uni-evm-vkey.bin")]
+        output: String,
+    },
 }
 
 #[tokio::main]
@@ -55,6 +62,8 @@ async fn main() -> Result<()> {
         Command::Run => run_node(&args.config).await,
         Command::GenerateKey { output } => generate_key(&output),
         Command::ShowPublicKey { key } => show_public_key(&key),
+        #[cfg(feature = "sp1")]
+        Command::ExtractVkey { output } => extract_vkey(&output),
     }
 }
 
@@ -125,6 +134,71 @@ fn show_public_key(key_input: &str) -> Result<()> {
     println!("Public Key: {}", keys::format_public_key(&public_key));
     println!();
     println!("Use this public key to register in BFT Core partition configuration");
+
+    Ok(())
+}
+
+#[cfg(feature = "sp1")]
+/// Extract SP1 verification key for BFT-Core deployment
+///
+/// This command extracts the verification key from the SP1 guest program ELF
+/// and saves it in bincode format for deployment to BFT-Core nodes.
+fn extract_vkey(output: &str) -> Result<()> {
+    use sp1_sdk::{HashableKey, ProverClient};
+
+    println!("Extracting SP1 verification key...");
+    println!();
+
+    // Get the ELF binary from the guest program
+    let elf = uni_evm_guest::UNI_EVM_SP1_ELF;
+
+    if elf.is_empty() {
+        eprintln!("ERROR: SP1 ELF binary is empty");
+        eprintln!();
+        eprintln!("The uni-evm-guest program was not built with SP1 support.");
+        eprintln!("To fix this:");
+        eprintln!("  1. Ensure SP1 toolchain is installed: curl -L https://sp1.succinctlabs.com | bash && sp1up");
+        eprintln!("  2. Rebuild with SP1 feature: cargo build --release --features sp1");
+        eprintln!();
+        std::process::exit(1);
+    }
+
+    println!("ELF size: {} bytes", elf.len());
+    println!("Setting up SP1 prover...");
+
+    // Initialize SP1 prover client and generate keys
+    let client = ProverClient::from_env();
+    let (_, vk) = client.setup(elf);
+
+    println!("Verification key generated successfully");
+    println!("VKey hash: {}", vk.vk.bytes32());
+
+    // Serialize the verification key using bincode
+    // This matches the format expected by BFT-Core's sp1-verifier-ffi
+    let vk_bytes = bincode::serialize(&vk.vk)?;
+
+    // Save to file
+    std::fs::write(output, &vk_bytes)?;
+
+    println!();
+    println!("✓ Verification key saved to: {}", output);
+    println!("  Size: {} bytes", vk_bytes.len());
+    println!("  Hash: {}", vk.vk.bytes32());
+    println!();
+    println!("Next steps:");
+    println!("  1. Copy {} to each BFT-Core validator node", output);
+    println!("  2. Configure BFT-Core nodes:");
+    println!("     --zk-verification-enabled=true");
+    println!("     --zk-proof-type=sp1");
+    println!(
+        "     --zk-vkey-path=/path/to/{}",
+        output.split('/').last().unwrap_or(output)
+    );
+    println!("  3. Restart BFT-Core nodes to load the verification key");
+    println!("  4. Set uni-evm config.toml: prover_type = \"sp1\"");
+    println!("  5. Restart uni-evm with SP1 proving enabled");
+    println!();
+    println!("IMPORTANT: All BFT-Core validators MUST use the exact same verification key!");
 
     Ok(())
 }

@@ -5,6 +5,7 @@ members = [
     "crates/bft-precompile",
     "crates/uni-sequencer",
     "crates/uni-storage",
+    "guest-program",
 ]
 resolver = "2"
 
@@ -78,6 +79,12 @@ uni-bft-committer = { path = "./crates/bft-committer" }
 uni-bft-precompile = { path = "./crates/bft-precompile" }
 uni-sequencer = { path = "./crates/uni-sequencer" }
 uni-storage = { path = "./crates/uni-storage" }
+uni-evm-guest = { path = "./guest-program" }
+
+# SP1 proving
+sp1-sdk = "5.0.8"
+sp1-prover = "5.0.8"
+bincode = "1.3"
 
 # Common dependencies
 tokio = { version = "1.41", features = ["full"] }

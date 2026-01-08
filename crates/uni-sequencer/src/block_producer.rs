@@ -81,7 +81,6 @@ pub struct BlockProducer {
 }
 
 impl BlockProducer {
-    /// Create a new block producer
     pub fn new(
         config: BlockProducerConfig,
         blockchain: Arc<Blockchain>,
@@ -94,8 +93,6 @@ impl BlockProducer {
             "Block producer initialized: {}ms interval, gas_limit: {}",
             config.block_time_ms, config.gas_limit
         );
-        info!("Block producer will wait for UC before producing next block");
-
         Self {
             config,
             blockchain,
@@ -109,10 +106,7 @@ impl BlockProducer {
     /// Start block production loop
     /// SYNCHRONOUS: Wait for transactions → Produce block → Wait for UC → Repeat
     pub async fn run(mut self) -> Result<(), BlockProducerError> {
-        info!("Starting synchronous block producer (UC-gated)");
-        info!("Block production sequence: wait for txs → produce → prove → submit → wait for UC → repeat");
-        info!("T1 timeout: {}ms (time window to collect transactions)", self.config.block_time_ms);
-        info!("⏳ Waiting for transactions before producing first block...");
+        info!("T1 timeout: {}ms, waiting for txs...", self.config.block_time_ms);
 
         'outer: loop {
             // Step 1: Wait for FIRST transaction (check mempool without producing)
@@ -140,7 +134,6 @@ impl BlockProducer {
             }
 
             // Step 2: T1 timeout window - collect more transactions
-            info!("⏳ Collecting transactions for {}ms (T1 timeout window)...", self.config.block_time_ms);
             tokio::time::sleep(Duration::from_millis(self.config.block_time_ms)).await;
 
             // Step 3: T1 expired, produce block with all collected transactions
@@ -155,7 +148,7 @@ impl BlockProducer {
                         // 1. Wrong nonce after previous block
                         // 2. Insufficient fees (base_fee increased)
                         // 3. ethrex issue #680 (mempool doesn't validate against current state)
-                        error!("⚠️  No valid transactions after T1 timeout!");
+                        error!("No valid transactions after T1 timeout!");
                         error!("   Detected {} txs in mempool, but couldn't include any",
                                self.blockchain.mempool.status().unwrap_or(0));
                         error!("   Likely cause: transactions filtered out by base_fee or invalid nonce");
@@ -180,8 +173,8 @@ impl BlockProducer {
                         continue 'outer;
                     }
                     Err(e) => {
-                        error!("❌ Failed to produce block: {}", e);
-                        error!("   Error type: {:?}", e);
+                        error!("Failed to produce block: {}", e);
+                        error!("Error type: {:?}", e);
 
                         // Check if this is a state-related error
                         let error_msg = format!("{}", e);
@@ -198,13 +191,6 @@ impl BlockProducer {
                 }
             };
 
-            info!(
-                "✓ Block {} produced with {} transaction(s) (hash: {:?})",
-                block_info.block_number,
-                block_info.tx_count,
-                block_info.block_hash,
-            );
-
             // Step 2: Notify proof coordinator (will generate proof and submit to BFT Core)
             if let Err(e) = self.block_tx.send(block_info.clone()).await {
                 error!("Failed to send block to proof coordinator: {}", e);
@@ -212,8 +198,6 @@ impl BlockProducer {
             }
 
             // Step 3: Wait for UC before producing next block
-            info!("⏳ Waiting for UC for block {} before producing next block...", block_info.block_number);
-
             let finalized_block_num = match self.finalized_rx.recv().await {
                 Some(finalized) => {
                     if finalized.block_number == block_info.block_number {
@@ -233,7 +217,7 @@ impl BlockProducer {
             };
 
             // Step 4: Continue to next block production cycle
-            info!("✓ Block {} finalized, continuing to next block production cycle", finalized_block_num);
+            info!("Block {} finalized, continuing to next block production cycle", finalized_block_num);
         }
     }
 
@@ -334,8 +318,6 @@ impl BlockProducer {
         debug!("Removed {} transactions from mempool after block production",
                build_result.payload.body.transactions.len());
 
-        info!("========================================");
-        info!("🔨 BLOCK PRODUCED");
         info!("========================================");
         info!("Block number:        {}", block_number);
         info!("Block hash:          {:?}", block_hash);

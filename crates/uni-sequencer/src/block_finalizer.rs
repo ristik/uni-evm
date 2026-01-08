@@ -187,18 +187,6 @@ impl BlockFinalizer {
             warn!("  UC state hashes: h={:?}, h'={:?}", uc_state_hash, uc_prev_hash);
             warn!("  Pending blocks: {:?}", self.pending_blocks.keys().collect::<Vec<_>>());
             warn!("  Last finalized: {}", self.last_finalized);
-
-            // Check if this UC's state was already finalized
-            if round <= self.last_finalized {
-                info!("  → Likely duplicate UC for already finalized block");
-                info!("  → Ignoring (block already UC-certified)");
-            } else {
-                warn!("  → Either:");
-                warn!("    1. Block was rejected by BFT Core (state hash doesn't match any pending)");
-                warn!("    2. This is a repeat UC and block was already finalized");
-                warn!("    3. Block hasn't been produced yet (we received UC before block production)");
-                warn!("  → Not finalizing any blocks");
-            }
         }
     }
 
