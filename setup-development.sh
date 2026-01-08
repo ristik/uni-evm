@@ -239,7 +239,7 @@ start_root_node() {
         --address "/ip4/127.0.0.1/tcp/$ROOT_P2P_PORT" \
         --trust-base "$GENESIS_DIR/trust-base.json" \
         --rpc-server-address "localhost:$ROOT_RPC_PORT" \
-        --log-level DEBUG --log-format text --log-file bft-root.log \
+        --log-level INFO --log-format text --log-file bft-root.log \
         --zk-verification-enabled=true --zk-vkey-path="$BFT_ROOT_DIR/uni-evm-vkey.bin" \
         > ./bft-root.out 2>&1 &
 

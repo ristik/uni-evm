@@ -172,7 +172,7 @@ impl UniEvmConfig {
             trust_base: TrustBaseConfig {
                 bft_core_endpoint: None, // Configure if BFT Core REST is available
                 filesystem_path: Some("./trust-base.json".to_string()),
-                update_interval_secs: 300, // 5 minutes
+                update_interval_secs: 60*60, // 1 hour
             },
         }
     }

@@ -506,96 +506,185 @@ impl UniEvmNode {
             };
             info!("Received UC from BFT Core: round {}, next expected round {}", uc_round, next_round);
         } else {
-            warn!("No UC received from handshake within timeout");
+            warn!("No UC received from handshake within timeout - may need sync UC");
         }
 
-        // Certify genesis state (block 0) before producing first transaction block
-        // This ensures we have a valid LUC with the genesis state root certified by BFT Core
+        // ========================================
+        // UC-BASED INITIALIZATION
+        // ========================================
+        // Based on BFT-Core partition/node.go handleUnicityCertificate logic
+        //
+        // We have received the latest UC from BFT Core via handshake.
+        // Determine what action is needed based on UC state:
+        //
+        // 1. Initial UC (both hashes nil): certify genesis state
+        // 2. UC matches committed state: start producing (no certification)
+        // 3. UC doesn't match: FATAL error (state mismatch, no recovery)
+
         info!("========================================");
-        info!("📝 CERTIFYING GENESIS STATE");
+        info!("🔍 ANALYZING RECEIVED UC FOR INITIALIZATION");
         info!("========================================");
 
-        // Get genesis state root from block 0
-        let genesis_state_root = match store.get_block_header(0) {
-            Ok(Some(header)) => {
-                info!("Genesis block 0 state_root: {:?}", header.state_root);
-                header.state_root
-            }
-            Ok(None) => {
-                warn!("Genesis block 0 header not found, using zero state root");
-                ethrex_common::H256::zero()
-            }
-            Err(e) => {
-                warn!("Failed to read genesis block header: {}, using zero state root", e);
-                ethrex_common::H256::zero()
-            }
-        };
-
-        // Send certification request for genesis state
-        info!("Submitting genesis state certification request...");
         let committer_opt = bft_committer_ref.lock().await.clone();
         if let Some(committer_arc) = committer_opt {
-            // Submit genesis state for certification
-            // Block hash is zero for genesis (no actual block with transactions)
-            let submit_result = {
-                let mut committer = committer_arc.lock().await;
-                committer.commit_block(
-                    0,  // block number (genesis)
-                    ethrex_common::H256::zero(),  // block hash (zero for genesis)
-                    ethrex_common::H256::zero(),  // previous state (zero for genesis)
-                    genesis_state_root,  // genesis state root to certify
-                    vec![0xDE, 0xAD, 0xBE, 0xEF],  // dummy proof for exec mode
-                ).await
-            }; // Drop committer lock here before waiting
+            // Extract UC data without holding lock (can't clone UC, so extract fields)
+            let (is_initial, uc_state, uc_prev_state, uc_round) = {
+                let committer = committer_arc.lock().await;
+                if let Some(uc) = committer.round_state().get_last_uc() {
+                    // Check if UC is initial (both hashes nil/empty)
+                    let is_initial = uc.input_record.as_ref()
+                        .map(|ir| {
+                            let hash_empty = ir.hash.as_ref().map_or(true, |h: &Vec<u8>| h.is_empty());
+                            let prev_empty = ir.previous_hash.as_ref().map_or(true, |h: &Vec<u8>| h.is_empty());
+                            hash_empty && prev_empty
+                        })
+                        .unwrap_or(false);
 
-            match submit_result {
-                Ok(_) => {
-                    info!("✓ Genesis state certification request submitted");
+                    let uc_state = uc.input_record.as_ref()
+                        .and_then(|ir| ir.hash.as_ref())
+                        .map(|h| ethrex_common::H256::from_slice(&h[..32]))
+                        .unwrap_or(ethrex_common::H256::zero());
 
-                    // Wait for genesis UC (with timeout)
-                    let genesis_timeout = tokio::time::Duration::from_secs(10);
-                    let start = tokio::time::Instant::now();
-                    let mut genesis_certified = false;
+                    let uc_prev_state = uc.input_record.as_ref()
+                        .and_then(|ir| ir.previous_hash.as_ref())
+                        .map(|h| ethrex_common::H256::from_slice(&h[..32]))
+                        .unwrap_or(ethrex_common::H256::zero());
 
-                    while start.elapsed() < genesis_timeout {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    let uc_round = uc.input_record.as_ref()
+                        .map(|ir| ir.round_number)
+                        .unwrap_or(0);
 
-                        // Re-acquire lock to check LUC (released after check)
-                        // Extract only the data we need to avoid cloning
-                        let (uc_state, uc_round) = {
-                            let committer = committer_arc.lock().await;
-                            if let Some(uc) = committer.round_state().get_last_uc() {
-                                let state = uc.input_record.as_ref()
-                                    .and_then(|ir| ir.hash.as_ref())
-                                    .map(|h| ethrex_common::H256::from_slice(&h[..32]))
-                                    .unwrap_or(ethrex_common::H256::zero());
-                                let round = uc.input_record.as_ref()
-                                    .map(|ir| ir.round_number)
-                                    .unwrap_or(0);
-                                (Some(state), round)
-                            } else {
-                                (None, 0)
+                    (is_initial, uc_state, uc_prev_state, uc_round)
+                } else {
+                    // No UC available
+                    (false, ethrex_common::H256::zero(), ethrex_common::H256::zero(), 0)
+                }
+            }; // Drop lock here
+
+            if is_initial || uc_round > 0 {  // Have UC data
+
+                if is_initial {
+                    // Case 1: Initial UC - need to certify genesis
+                    info!("✓ UC is INITIAL (both hashes nil) - need to certify genesis");
+                    info!("========================================");
+                    info!("📝 CERTIFYING GENESIS STATE");
+                    info!("========================================");
+
+                    let genesis_state_root = match store.get_block_header(0) {
+                        Ok(Some(header)) => {
+                            info!("Genesis block 0 state_root: {:?}", header.state_root);
+                            header.state_root
+                        }
+                        Ok(None) => {
+                            warn!("Genesis block 0 header not found, using zero state root");
+                            ethrex_common::H256::zero()
+                        }
+                        Err(e) => {
+                            warn!("Failed to read genesis block header: {}, using zero state root", e);
+                            ethrex_common::H256::zero()
+                        }
+                    };
+
+                    let submit_result = {
+                        let mut committer = committer_arc.lock().await;
+                        committer.commit_block(
+                            0,  // block number (genesis)
+                            ethrex_common::H256::zero(),  // block hash (zero for genesis)
+                            ethrex_common::H256::zero(),  // previous state (zero for genesis)
+                            genesis_state_root,  // genesis state root to certify
+                            vec![0xDE, 0xAD, 0xBE, 0xEF],  // dummy proof for exec mode
+                        ).await
+                    };
+
+                    match submit_result {
+                        Ok(_) => {
+                            info!("✓ Genesis state certification request submitted");
+                            info!("Waiting for UC (up to 10 seconds)...");
+
+                            let timeout = tokio::time::Duration::from_secs(10);
+                            let start = tokio::time::Instant::now();
+                            let mut certified = false;
+
+                            while start.elapsed() < timeout {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                let (uc_state, uc_round) = {
+                                    let committer = committer_arc.lock().await;
+                                    if let Some(uc) = committer.round_state().get_last_uc() {
+                                        let state = uc.input_record.as_ref()
+                                            .and_then(|ir| ir.hash.as_ref())
+                                            .map(|h| ethrex_common::H256::from_slice(&h[..32]))
+                                            .unwrap_or(ethrex_common::H256::zero());
+                                        let round = uc.input_record.as_ref()
+                                            .map(|ir| ir.round_number)
+                                            .unwrap_or(0);
+                                        (Some(state), round)
+                                    } else {
+                                        (None, 0)
+                                    }
+                                };
+
+                                if let Some(state) = uc_state {
+                                    if state == genesis_state_root {
+                                        certified = true;
+                                        info!("✓ Genesis state certified (UC round {})", uc_round);
+                                        break;
+                                    }
+                                }
                             }
-                        };
 
-                        if let Some(state) = uc_state {
-                            if state == genesis_state_root {
-                                genesis_certified = true;
-                                info!("✓ Genesis state certified (UC round {})", uc_round);
-                                break;
+                            if !certified {
+                                warn!("⚠️  Genesis certification timeout - continuing anyway");
+                                warn!("   First block will establish the certified chain");
                             }
                         }
+                        Err(e) => {
+                            warn!("Failed to submit genesis certification: {}", e);
+                            warn!("Continuing - first block will establish the chain");
+                        }
                     }
+                } else {
+                    // Case 2 or 3: UC has valid state hashes (already extracted above)
+                    info!("✓ UC has valid state:");
+                    info!("  UC.state:      {:?}", uc_state);
+                    info!("  UC.prev_state: {:?}", uc_prev_state);
 
-                    if !genesis_certified {
-                        warn!("⚠️  Genesis certification timeout - continuing anyway");
-                        warn!("   First block will establish the certified chain");
+                    // Get committed state from blockchain
+                    // IMPORTANT: Use latest_block_number (actual block count), NOT last_certified_block (round number)
+                    // Round numbers can be higher than block numbers (rounds increment even without blocks)
+                    info!("  Latest block number: {}", latest_block_number);
+
+                    let committed_state = match store.get_block_header(latest_block_number) {
+                        Ok(Some(header)) => {
+                            info!("  Committed block {}: state_root={:?}", latest_block_number, header.state_root);
+                            header.state_root
+                        }
+                        Ok(None) => {
+                            error!("❌ FATAL: Block {} header not found in store", latest_block_number);
+                            return Err(anyhow::anyhow!("Block header not found"));
+                        }
+                        Err(e) => {
+                            error!("❌ FATAL: Cannot read block {} header: {}", latest_block_number, e);
+                            return Err(anyhow::anyhow!("Cannot read block header"));
+                        }
+                    };
+
+                    // Check if UC state matches committed state
+                    if uc_state == committed_state {
+                        info!("✓ UC state matches committed state");
+                        info!("✓ Ready to produce blocks - no certification needed");
+                        info!("  Next round will be: {}", uc_round + 1);
+                    } else {
+                        error!("❌ FATAL: STATE MISMATCH");
+                        error!("  UC state:        {:?}", uc_state);
+                        error!("  Committed state: {:?}", committed_state);
+                        error!("  This indicates UC and local state are out of sync");
+                        error!("  Recovery not implemented - terminating");
+                        return Err(anyhow::anyhow!("State mismatch: UC state != committed state"));
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to submit genesis certification: {}", e);
-                    warn!("Continuing - first block will establish the chain");
-                }
+            } else {
+                warn!("No LUC available after handshake - continuing without initial UC");
+                warn!("First block certification will establish the chain");
             }
         }
 

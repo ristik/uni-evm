@@ -253,6 +253,38 @@ impl BlockProducer {
             .map_err(|e| BlockProducerError::StorageError(e.to_string()))?
             .as_secs();
 
+        // CRITICAL: Check if parent state root exists in database before trying to build
+        info!("========================================");
+        info!("🔍 PRE-BUILD STATE CHECK");
+        info!("========================================");
+        info!("Parent state root: {:?}", parent_state_root);
+
+        match self.store.has_state_root(parent_state_root) {
+            Ok(true) => {
+                info!("✓ Parent state root EXISTS in database");
+            }
+            Ok(false) => {
+                error!("❌ FATAL: Parent state root MISSING from database!");
+                error!("   This is the root cause of 'state root missing' error");
+                error!("   Parent block {}: state_root={:?}", latest_block_number, parent_state_root);
+                error!("   Cannot build block {} without parent state", latest_block_number + 1);
+
+                // Try to diagnose why state is missing
+                error!("   Diagnosis:");
+                error!("   1. Was parent block {} properly finalized?", latest_block_number);
+                error!("   2. Did state commit succeed after block production?");
+                error!("   3. Is there a race between block production and state commit?");
+
+                return Err(BlockProducerError::StorageError(
+                    format!("Parent state root {:?} missing from database", parent_state_root)
+                ));
+            }
+            Err(e) => {
+                error!("❌ FATAL: Cannot check state root existence: {}", e);
+                return Err(BlockProducerError::StorageError(e.to_string()));
+            }
+        }
+
         // Build payload args
         let payload_args = BuildPayloadArgs {
             parent: parent_hash,
@@ -266,22 +298,79 @@ impl BlockProducer {
             gas_ceil: self.config.gas_limit,
         };
 
+        info!("Creating empty payload...");
         // Create empty payload
         // create_payload signature: (args: &BuildPayloadArgs, store: &Store, extra_data: Bytes)
         let extra_data = ethrex_common::Bytes::new(); // Empty extra data
         let mut payload = create_payload(&payload_args, &self.store, extra_data)?;
+        info!("✓ Empty payload created");
 
         // Set gas limit
         payload.header.gas_limit = self.config.gas_limit;
 
         // Build payload (fill with transactions from mempool)
+        info!("Building payload (executing transactions)...");
         let build_result = self.blockchain.build_payload(payload)?;
+        info!("✓ Payload built successfully");
 
         // Get block info from the built payload
         let block_hash = build_result.payload.hash();
         let block_number = build_result.payload.header.number;
         let state_root = build_result.payload.header.state_root;
         let tx_count = build_result.payload.body.transactions.len();
+
+        // CRITICAL: Persist state trie nodes to disk
+        // build_payload() creates state in memory but doesn't commit to database
+        // We need to explicitly persist it so the next block can use this state
+        info!("Persisting state trie nodes to disk...");
+        let account_updates_list = self.store
+            .apply_account_updates_batch(parent_hash, &build_result.account_updates)?
+            .ok_or_else(|| BlockProducerError::StorageError("Parent state not found".to_string()))?;
+
+        // Verify the state root matches
+        if account_updates_list.state_trie_hash != state_root {
+            error!(
+                "State root mismatch! Expected {:?}, got {:?}",
+                state_root, account_updates_list.state_trie_hash
+            );
+            return Err(BlockProducerError::StorageError(
+                format!("State root mismatch: expected {:?}, got {:?}",
+                    state_root, account_updates_list.state_trie_hash)
+            ));
+        }
+
+        // Create update batch with state trie nodes, block, and receipts
+        let update_batch = ethrex_storage::UpdateBatch {
+            account_updates: account_updates_list.state_updates,
+            storage_updates: account_updates_list.storage_updates,
+            blocks: vec![build_result.payload.clone()],
+            receipts: vec![(block_hash, build_result.receipts.clone())],
+            code_updates: account_updates_list.code_updates,
+        };
+
+        // Persist everything to disk in a single transaction
+        self.store.store_block_updates(update_batch)?;
+        info!("✓ State trie nodes persisted to disk");
+
+        info!("========================================");
+        info!("🔍 POST-BUILD STATE CHECK");
+        info!("========================================");
+        info!("New state root: {:?}", state_root);
+
+        // Check if new state root exists (it should after build_payload)
+        match self.store.has_state_root(state_root) {
+            Ok(true) => {
+                info!("✓ New state root EXISTS in database (committed by build_payload)");
+            }
+            Ok(false) => {
+                warn!("⚠️  WARNING: New state root NOT in database yet!");
+                warn!("   This may be normal if state isn't committed until block finalization");
+                warn!("   But if so, we have a problem: next block will need this state!");
+            }
+            Err(e) => {
+                warn!("Cannot check new state root: {}", e);
+            }
+        }
 
         // Check if block has transactions - we only produce blocks with transactions
         if tx_count == 0 {
@@ -295,16 +384,31 @@ impl BlockProducer {
         // validate_block signature has changed, needs additional parameters
         // validate_block(&build_result.payload, &self.store)?;
 
-        debug!("Storing block {} with hash {:?}", block_number, block_hash);
-
-        // Store block AND mark as canonical (needed for proof generation)
-        self.store.add_block(build_result.payload.clone()).await?;
-
         // Mark block as canonical so proof coordinator can read it
-        // Note: This makes the block readable but we still track UC-certification separately
+        // Note: Block was already stored via store_block_updates() above
+        // This just updates the canonical chain pointer
+        info!("Marking block {} as canonical...", block_number);
         self.store
             .forkchoice_update(vec![], block_number, block_hash, None, None)
             .await?;
+        info!("✓ Block marked as canonical");
+
+        // CRITICAL: Verify state is still accessible after storing block
+        info!("========================================");
+        info!("🔍 POST-STORE STATE CHECK");
+        info!("========================================");
+        match self.store.has_state_root(state_root) {
+            Ok(true) => {
+                info!("✓ State root still accessible after block storage");
+            }
+            Ok(false) => {
+                error!("❌ CRITICAL: State root LOST after block storage!");
+                error!("   This will cause 'state root missing' on next block!");
+            }
+            Err(e) => {
+                error!("Cannot verify state root after storage: {}", e);
+            }
+        }
 
         // CRITICAL: Clear processed transactions from mempool
         // After block production, remove all transactions that were included
