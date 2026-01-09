@@ -1,129 +1,121 @@
 # Uni-EVM L2
 
-An EVM L2 blockchain built on [ethrex](https://github.com/lambdaclass/ethrex) that submits per-block ZK proofs to Unicity Consensus Layer (BFT Core).
+An EVM L2 blockchain that uses [Unicity BFT Core](https://github.com/unicitynetwork/bft-core/tree/l1) as L1.
 
-## Features
+Communications and consensus model by https://github.com/unicitynetwork/specs/blob/main/bft-core-spec/unicity-bft-core.pdf
 
-- 🔒 **EVM-Compatible**: Full Ethereum smart contract support
-- ⚡ **ZK-Proven**: SP1-based proof generation for every block
-- 🌐 **Custom L1**: Integrates with BFT Core via libp2p
-- 🔧 **Custom Precompile**: Unicity Certificate verification at `0x100`
-- 📡 **JSON-RPC API**: 18 endpoints for dApp integration
-- 🚀 **Simplified**: Single-node L2 architecture, no P2P complexity
+Built on [ethrex](https://github.com/lambdaclass/ethrex) EVM.
 
-## Architecture
+## What It Does
 
-```
-┌──────────────────────────────────────────────────────┐
-│                   Unicity-EVM L2                      │
-│                                                       │
-│  Users → RPC → Block Producer → SP1 Prover           │
-│                       ↓              ↓                │
-│                  Blockchain  →  BFT Committer         │
-│                                      ↓                │
-└──────────────────────────────────────┼───────────────┘
-                                       ↓
-                              ┌───────────────────────────┐
-                              │  BFT Core L1               │
-                              │  (Unicity Consensus Layer) │
-                              └───────────────────────────┘
-```
+**Full EVM blockchain** with:
+- **EVM execution** - Complete smart contract support (ethrex VM)
+- **State management** - MPT state trie, accounts, storage (ethrex storage)
+- **ZK proving** - SP1 proofs for every block (ethrex-prover)
+- **zkVM guest verifier** - generates execution trace for proving
+- **JSON-RPC API** - 18 standard RPC endpoints
+- **Block production** - Automatic sequencing with configurable block time
+- **L1 finality** - Each block synchronously certified by Unicity BFT Core consensus
+- **UC verification** - Custom precompile for Unicity Certificate validation
+
+## Key Differences from ethrex L2
+
+**What we changed:**
+
+| Component | ethrex L2 | uni-evm |
+|-----------|-----------|---------|
+| **L1 Integration** | Ethereum (RPC/RLP) | BFT Core (libp2p/CBOR) |
+| **Proving Strategy** | Batch multiple blocks | Prove each block synchronously |
+| **Proof Format** | Compressed or Groth16 | Compressed only (no wrapping) |
+| **Network Mode** | P2P sync with multiple nodes | Single sequencer node |
+| **RPC Server** | Full P2P dependencies | Reduced, no sync/peers |
+| **Gas Estimation** | Committed state only | Applies pending transactions |
+| **Precompiles** | Standard EVM set | + UC verifier at 0x100 |
+| **Finality** | Standard rollup soft finality | Strong finality |
+
+**Why these changes:**
+- BFT Core is not Ethereum → custom CBOR/libp2p integration
+- BFT Core verifies SP1 natively → no Groth16 wrapping needed, other proofs possible
+- Single sequencer design → simplified architecture
+- User experience → pending state for consecutive transactions, smooths up longer wait until real finality
 
 ## Quick Start
 
 ### Prerequisites
 
 ```bash
-# 1. Install Rust nightly (required for ethrex)
-rustup toolchain install nightly
+# Required: Rust nightly (ethrex uses let_chains)
 rustup override set nightly
 
-# 2. Install SP1 toolchain
+# Optional: SP1 for real proofs (or use exec mode for testing)
 curl -L https://sp1.succinctlabs.com | bash
 sp1up
 ```
 
-### Build
+### Build & Run
 
 ```bash
-cargo build --release
-```
+# Build
+cargo build --release --features sp1
 
-### Configure
+# Configure (optional)
+cp config.toml.example config.toml
+vim config.toml  # Set prover_type = "exec" for testing without proofs
 
-```bash
-# Copy example configuration
-cp config.toml my-config.toml
-
-# Edit configuration (optional)
-vim my-config.toml
-```
-
-### Run
-
-```bash
+# Run
 cargo run --release
 ```
 
-The node will start with:
-- **RPC server** at `http://localhost:8545`
-- **Block production** every 1 second
-- **SP1 proof generation** for each block
+RPC server starts at `http://localhost:8545`
 
 ### Test
 
 ```bash
-# Check chain ID
-curl -X POST http://localhost:8545 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
-
-# Or use cast (Foundry)
+# Basic RPC
 cast chain-id --rpc-url http://localhost:8545
 cast block-number --rpc-url http://localhost:8545
+
+# Send transaction
+cast send 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --value 0.1ether \
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --rpc-url http://localhost:8545 \
+  --async  # use async if proving is enabled
+
+# Test consecutive transactions (pending state fix)
+./test-pending-state.sh
 ```
-
-## Documentation
-
-- **[IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md)** - Complete implementation overview
-- **[TESTING.md](TESTING.md)** - Comprehensive testing guide
-- **[PHASE5_PROGRESS.md](PHASE5_PROGRESS.md)** - Latest development progress
-- **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** - Known issues and workarounds
-
-### Phase Documentation
-
-- [Phase 1: Repository Setup](PHASE1_COMPLETE.md)
-- [Phase 2: BFT Core Integration](PHASE2_COMPLETE.md)
-- [Phase 3: Custom Sequencer](PHASE3_COMPLETE.md)
-- [Phase 4: Custom Precompile](PHASE4_COMPLETE.md)
-- [Phase 5: Complete Integration](PHASE5_PROGRESS.md)
 
 ## Project Structure
 
 ```
 uni-evm/
-├── crates/
-│   ├── uni-bft-committer/     # Unicity BFT Core integration
-│   ├── uni-bft-precompile/    # Unicity trust anchor for EVM
-│   ├── uni-sequencer/         # Block producer + proof coordinator
-│   └── uni-storage/           # Simplified storage layer
+├── ethrex/                      # Git submodule - DO NOT MODIFY
+│   ├── crates/vm/              # EVM execution
+│   ├── crates/storage/         # State management
+│   ├── crates/blockchain/      # Block validation
+│   └── crates/prover/          # SP1 proof generation
 │
-├── cmd/uni-evm/               # Main binary
+├── crates/                      # Our custom code
+│   ├── uni-bft-committer/      # L1 integration (libp2p/CBOR)
+│   ├── uni-sequencer/          # Block producer + proof coordinator
+│   ├── uni-bft-precompile/     # UC verification precompile
+│   └── uni-storage/            # Simplified storage (UCs + proofs)
+│
+├── cmd/uni-evm/
 │   └── src/
-│       ├── main.rs            # Entry point
-│       ├── node.rs            # Node orchestration
-│       ├── config.rs          # Configuration
-│       └── rpc.rs             # RPC server
+│       ├── main.rs             # Node orchestration
+│       ├── rpc.rs              # RPC services
+│       ├── pending_state.rs    # Gas estimation with pending txs
+│       ├── config.rs           # Configuration
+│       └── keys.rs             # BFT Core signing keys
 │
-├── ethrex/                    # Git submodule (upstream)
-├── config.toml                # Configuration file
-├── genesis.json               # Genesis block
-└── README.md                  # This file
+├── config.toml.example         # Example configuration
+├── genesis.json                # Genesis block (minimal post-merge)
+└── *.sh                        # Test and setup scripts
 ```
 
 ## Configuration
-
-### Basic Configuration
 
 ```toml
 [network]
@@ -131,61 +123,110 @@ chain_id = 1
 genesis_file_path = "./genesis.json"
 
 [sequencer]
-block_time_ms = 1000    # 1 second blocks
-gas_limit = 30000000    # 30M gas
+block_time_ms = 5000           # 5s for collecting txs ("t1 time")
+gas_limit = 30000000
 
 [rpc]
 http_addr = "127.0.0.1"
 http_port = 8545
 
 [prover]
-prover_type = "sp1"     # or "exec" for testing without proofs
-proof_format = "compressed"
+prover_type = "sp1"            # or "exec" for faster development
+proof_format = "compressed"    # No groth16 on top, faster but larger proof
+
+[bft_committer]
+bft_core_peers = ["/ip4/127.0.0.1/tcp/30300/p2p/12D3..."]
+signing_key_path = "./keys/signing.key"
 ```
 
-See `config.toml` for full configuration options.
+## How It Works
 
-## RPC API
+### Block Production Flow
 
-### Supported Methods
-
-**eth_* namespace** (15 endpoints):
-- `eth_chainId`, `eth_blockNumber`, `eth_getBalance`
-- `eth_getBlockByNumber`, `eth_getBlockByHash`
-- `eth_getTransactionByHash`, `eth_getTransactionReceipt`
-- `eth_sendRawTransaction`, `eth_call`, `eth_estimateGas`
-- `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`
-- `eth_gasPrice`, `eth_getBlockTransactionCount*`
-
-**net_* namespace** (3 endpoints):
-- `net_version`, `net_listening`, `net_peerCount`
+```
+User Transaction
+  ↓
+RPC Server (eth_sendRawTransaction)
+  ↓
+Mempool (with pending state tracking)
+  ↓
+Block Producer (every block_time_ms)
+  ↓
+Execution (ethrex VM)
+  ↓
+Proof Coordinator
+  ├─ Generate witness (ethrex)
+  ├─ Build ProgramInput
+  └─ prove(Backend::SP1, input, Compressed) → proof bytes
+  ↓
+BFT Committer
+  ├─ Create BlockCertificationRequest (CBOR)
+  ├─ Sign with secp256k1
+  └─ Send via libp2p to BFT Core
+  ↓
+BFT Core L1
+  ├─ Verify SP1 proof
+  ├─ Consensus on state transition
+  └─ Return UnicityCertificate
+  ↓
+Storage (block + UC persisted)
+  ↓
+Block Finalized ✓
+```
 
 ## Custom Precompile
 
-### Unicity Verifier (0x100)
+**Unicity Certificate Verifier (0x100)**
 
-Verifies Unicity Certificates (the trust anchor of Unicity tokens) from Unicity BFT Core:
+Verifies signatures from BFT Core validators:
 
 ```solidity
 interface IUnicityVerifier {
     function verifyUnicityCertificate(bytes calldata ucCbor)
-        external view
-        returns (bool valid, bytes32 stateHash, uint64 roundNumber);
+        external view returns (bool valid, bytes32 stateHash, uint64 roundNumber);
 }
 
-contract Example {
-    IUnicityVerifier constant VERIFIER = IUnicityVerifier(0x0000000000000000000000000000000000000100);
-
-    function checkCertificate(bytes calldata uc) external view returns (bool) {
-        (bool valid, , ) = VERIFIER.verifyUnicityCertificate(uc);
-        return valid;
-    }
-}
+// Usage
+IUnicityVerifier(0x0000000000000000000000000000000000000100)
+    .verifyUnicityCertificate(ucBytes);
 ```
 
-See `crates/uni-bft-precompile/INTEGRATION.md` for details.
+See `crates/uni-bft-precompile/INTEGRATION.md` for implementation details.
+
+## RPC API
+
+**Supported** (18 endpoints):
+- `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getCode`
+- `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getTransactionByHash`
+- `eth_getTransactionReceipt`, `eth_sendRawTransaction`
+- `eth_call`, `eth_estimateGas` (with pending state)
+- `eth_getStorageAt`, `eth_getTransactionCount`, `eth_gasPrice`
+- `net_version`, `net_listening`, `net_peerCount`
+
+**Not supported**:
+- Engine API (no external consensus, BFT Core handles this)
+- Admin API (single-node, no peer management)
+- Debug/trace API (planned)
 
 ## Development
+
+### Testing Without Proofs
+
+```toml
+[prover]
+prover_type = "exec"  # Dummy proofs [0xDE, 0xAD, 0xBE, 0xEF]
+```
+
+Allows fast iteration without 5min SP1 proving overhead.
+
+### Testing With SP1 STARK Proofs
+
+```toml
+[prover]
+prover_type = "sp1"
+```
+
+Requires SP1 toolchain installed. Increase `block_time_ms` and T2 timeout.
 
 ### Running Tests
 
@@ -193,101 +234,38 @@ See `crates/uni-bft-precompile/INTEGRATION.md` for details.
 # Unit tests
 cargo test --workspace
 
-# Integration tests
-./scripts/test-e2e.sh
+# Manual integration testing
+cast send <recipient> --value 1ether --private-key <key> --rpc-url http://localhost:8545
 ```
 
-### Testing Mode (No Proofs)
+## Documentation
 
-For faster iteration without SP1 proof generation:
+**Implementation docs:**
+- `CLAUDE.md` - Development guide for Claude Code
+- `crates/uni-bft-precompile/INTEGRATION.md` - Precompile integration
+- https://github.com/unicitynetwork/bft-core/blob/l1/rootchain/consensus/zkverifier/sp1-verifier-ffi/README.md
+- https://github.com/unicitynetwork/bft-core/blob/l1/rootchain/consensus/zkverifier/FFI_INTEGRATION.md
 
-```toml
-[prover]
-prover_type = "exec"  # Skip proof generation
-```
-
-### Monitoring
-
-```bash
-# Watch blocks being produced
-watch -n 1 'cast block-number --rpc-url http://localhost:8545'
-
-# Monitor logs
-tail -f ./logs/uni-evm.log
-```
-
-## Performance
-
-| Metric | Value |
-|--------|-------|
-| Block time | 1 second (configurable) |
-| Gas limit | 30M per block |
-| Proof generation | 30s - 2min (dev mode) |
-| RPC latency | < 100ms (local) |
 
 ## Known Issues
 
-1. **Requires Rust Nightly**: ethrex uses unstable `let_chains` feature
+1. **Rust Nightly Required** - ethrex uses unstable `let_chains`
    - Workaround: `rustup override set nightly`
 
-2. **Proof Generation Slow**: SP1 proving takes 30s-2min per block
+2. **SP1 Proving Slow** - 5min per block (on my machine)
    - Workaround: Use `prover_type = "exec"` for testing
-   - Or increase `block_time_ms` to match proof time
+   - Production: proper CPUs or GPU acceleration (10-30s per block)
 
-3. **Precompile Registration**: Custom precompile requires manual ethrex modification
+3. **Precompile Not Auto-Registered** - Requires manual ethrex modification
    - See `crates/uni-bft-precompile/INTEGRATION.md`
 
-See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for complete list.
 
-## Roadmap
+## Performance
 
-### ✅ Completed
-
-- [x] Repository setup and workspace structure
-- [x] BFT Core L1 integration (libp2p + CBOR)
-- [x] Block producer and proof coordinator
-- [x] Unicity verification precompile
-- [x] RPC server (18 endpoints)
-- [x] Genesis block initialization
-- [x] SP1 proof generation integration
-
-### 🔄 In Progress
-
-- [ ] End-to-end integration testing
-- [ ] Trust base update mechanism
-- [ ] Precompile registration in ethrex
-
-### 📋 Planned
-
-- [ ] Performance optimization (GPU proving)
-- [ ] Monitoring and metrics (Prometheus)
-- [ ] Multi-node coordination
-- [ ] Additional precompiles
-- [ ] Block explorer
+TODO
 
 ## Resources
 
 - **ethrex**: https://github.com/lambdaclass/ethrex
 - **SP1**: https://docs.succinct.xyz/sp1
-- **Unicity BFT Core**: https://github.com/unicitynetwork/bft-core
-
-
-## Acknowledgments
-
-- Built on [ethrex](https://github.com/lambdaclass/ethrex) by Lambda Class
-- Uses [SP1](https://github.com/succinctlabs/sp1) for ZK proofs
-- Integrates with Unicity BFT Core
-
----
-
-## Support
-
-- **Documentation**: See docs in this repository
-- **Issues**: [GitHub Issues](https://github.com/ristik/uni-evm/issues)
-- **Community**: [Discord](https://discord.gg/unicity-etc)
-
----
-
-**Status**: Core implementation complete ✅ | Ready for testing 🧪
-
-For detailed implementation information, see [IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md).
+- **Unicity BFT Core**: https://github.com/unicitynetwork/bft-core/tree/l1
