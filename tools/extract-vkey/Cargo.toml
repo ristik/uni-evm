@@ -1,0 +1,11 @@
+[package]
+name = "extract-vkey"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone package (not part of parent workspace)
+[workspace]
+
+[dependencies]
+sp1-sdk = "5.0.8"
+bincode = "1.3"
