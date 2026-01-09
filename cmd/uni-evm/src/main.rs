@@ -11,6 +11,7 @@ use tracing_subscriber;
 mod config;
 mod keys;
 mod node;
+mod pending_state;
 mod rpc;
 
 use config::UniEvmConfig;
