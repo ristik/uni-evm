@@ -58,6 +58,7 @@ impl ProverConfig {
     ///
     /// This maps the configuration string to our custom backend:
     /// - "exec" → ProverBackend::Exec (dummy proofs for testing)
+    /// - "light_client" → ProverBackend::LightClient (witness validation on L1)
     /// - "sp1" → ProverBackend::Sp1 (real SP1 ZK proofs)
     ///
     /// Returns an error if:
@@ -66,6 +67,8 @@ impl ProverConfig {
     pub fn get_backend(&self) -> Result<ProverBackend> {
         match self.prover_type.to_lowercase().as_str() {
             "exec" => Ok(ProverBackend::Exec),
+
+            "light_client" | "light-client" => Ok(ProverBackend::LightClient),
 
             #[cfg(feature = "sp1")]
             "sp1" => Ok(ProverBackend::Sp1),
@@ -76,7 +79,7 @@ impl ProverConfig {
             )),
 
             _ => Err(anyhow::anyhow!(
-                "Unknown prover_type: '{}'. Valid options: exec, sp1",
+                "Unknown prover_type: '{}'. Valid options: exec, light_client, sp1",
                 self.prover_type
             )),
         }

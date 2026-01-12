@@ -201,6 +201,7 @@ impl UniEvmNode {
         info!("Setting up UC callback...");
         let uc_store = uni_store.clone();
         let finalizer_handle_for_uc = finalizer_handle.clone();
+        let store_for_rollback = store.clone(); // For rolling back on repeat UC
         // Will be set after committer is created
         let bft_committer_ref: Arc<Mutex<Option<Arc<Mutex<BftCommitter>>>>> = Arc::new(Mutex::new(None));
         let committer_for_uc = bft_committer_ref.clone();
@@ -296,26 +297,83 @@ impl UniEvmNode {
                     }
 
                     uni_bft_committer::types::UcValidation::Repeat => {
-                        warn!("Repeat UC for round {} - root chain timeout, block not accepted", round);
-                        // CRITICAL: Update LUC with new TechnicalRecord for correct next_round
-                        info!("Updating LUC with repeat UC (contains updated next_round from TechnicalRecord)");
+                        warn!("Repeat UC for round {} - block certification request not accepted", round);
+
+                        // CRITICAL: Roll back to the state identified by this UC
+                        // The UC's InputRecord.Hash tells us the last certified state
+                        let target_state_root = uc.input_record.as_ref()
+                            .and_then(|ir| ir.hash.as_ref())
+                            .and_then(|h| {
+                                if h.len() >= 32 {
+                                    Some(ethrex_common::H256::from_slice(&h[..32]))
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow::anyhow!("Repeat UC missing state hash"))?;
+
+                        info!("Rolling back to state: {:?}", target_state_root);
+
+                        // Roll back blockchain state
+                        {
+                            let store = store_for_rollback.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = store.rollback_to_state(target_state_root).await {
+                                    error!("❌ FATAL: State rollback failed: {}", e);
+                                    error!("   Cannot continue - blockchain state is inconsistent");
+                                    std::process::exit(1);
+                                }
+                                info!("✓ State rolled back successfully");
+                            });
+                        }
+
+                        // Clear proposed block metadata
                         {
                             let committer = committer_arc.try_lock()?;
                             committer.round_state().clear_proposed_block();
-                            info!("Cleared proposed block due to timeout");
+                            info!("Cleared proposed block metadata");
                         }
+
                         false  // Don't finalize blocks, but DO update LUC below
                     }
 
                     uni_bft_committer::types::UcValidation::RoundMismatch { uc_round, proposed_round } => {
                         error!("UC round {} doesn't match proposed {}", uc_round, proposed_round);
-                        // CRITICAL: Update LUC even on mismatch to get latest TechnicalRecord
-                        info!("Updating LUC with mismatched UC (contains updated next_round from TechnicalRecord)");
+
+                        // CRITICAL: Roll back to the state identified by this UC
+                        let target_state_root = uc.input_record.as_ref()
+                            .and_then(|ir| ir.hash.as_ref())
+                            .and_then(|h| {
+                                if h.len() >= 32 {
+                                    Some(ethrex_common::H256::from_slice(&h[..32]))
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow::anyhow!("Mismatch UC missing state hash"))?;
+
+                        info!("Round mismatch - rolling back to state: {:?}", target_state_root);
+
+                        // Roll back blockchain state
+                        {
+                            let store = store_for_rollback.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = store.rollback_to_state(target_state_root).await {
+                                    error!("❌ FATAL: State rollback failed: {}", e);
+                                    error!("   Cannot continue - blockchain state is inconsistent");
+                                    std::process::exit(1);
+                                }
+                                info!("✓ State rolled back successfully");
+                            });
+                        }
+
+                        // Clear proposed block metadata
                         {
                             let committer = committer_arc.try_lock()?;
                             committer.round_state().clear_proposed_block();
                             error!("Cleared proposed block due to mismatch - will resync");
                         }
+
                         false  // Don't finalize, but DO update LUC below
                     }
 
@@ -519,11 +577,7 @@ impl UniEvmNode {
         //
         // 1. Initial UC (both hashes nil): certify genesis state
         // 2. UC matches committed state: start producing (no certification)
-        // 3. UC doesn't match: FATAL error (state mismatch, no recovery)
-
-        info!("========================================");
-        info!("🔍 ANALYZING RECEIVED UC FOR INITIALIZATION");
-        info!("========================================");
+        // 3. UC doesn't match: (state mismatch, roll back if possible, fatal error otherwise)
 
         let committer_opt = bft_committer_ref.lock().await.clone();
         if let Some(committer_arc) = committer_opt {
@@ -565,10 +619,7 @@ impl UniEvmNode {
 
                 if is_initial {
                     // Case 1: Initial UC - need to certify genesis
-                    info!("✓ UC is INITIAL (both hashes nil) - need to certify genesis");
-                    info!("========================================");
-                    info!("📝 CERTIFYING GENESIS STATE");
-                    info!("========================================");
+                    info!("CERTIFYING GENESIS STATE...");
 
                     let genesis_state_root = match store.get_block_header(0) {
                         Ok(Some(header)) => {
@@ -598,8 +649,7 @@ impl UniEvmNode {
 
                     match submit_result {
                         Ok(_) => {
-                            info!("✓ Genesis state certification request submitted");
-                            info!("Waiting for UC (up to 10 seconds)...");
+                            info!("Genesis state certification request submitted");
 
                             let timeout = tokio::time::Duration::from_secs(10);
                             let start = tokio::time::Instant::now();
@@ -626,7 +676,7 @@ impl UniEvmNode {
                                 if let Some(state) = uc_state {
                                     if state == genesis_state_root {
                                         certified = true;
-                                        info!("✓ Genesis state certified (UC round {})", uc_round);
+                                        info!("Genesis state certified (UC round {})", uc_round);
                                         break;
                                     }
                                 }
@@ -634,17 +684,15 @@ impl UniEvmNode {
 
                             if !certified {
                                 warn!("⚠️  Genesis certification timeout - continuing anyway");
-                                warn!("   First block will establish the certified chain");
                             }
                         }
                         Err(e) => {
                             warn!("Failed to submit genesis certification: {}", e);
-                            warn!("Continuing - first block will establish the chain");
                         }
                     }
                 } else {
                     // Case 2 or 3: UC has valid state hashes (already extracted above)
-                    info!("✓ UC has valid state:");
+                    info!("UC has valid certified state:");
                     info!("  UC.state:      {:?}", uc_state);
                     info!("  UC.prev_state: {:?}", uc_prev_state);
 
@@ -684,14 +732,11 @@ impl UniEvmNode {
                 }
             } else {
                 warn!("No LUC available after handshake - continuing without initial UC");
-                warn!("First block certification will establish the chain");
             }
         }
 
         // This maintains UC feed subscription even if BFT Core cannot dial back
-        info!("========================================");
-        info!("🔄 STARTING PERIODIC HANDSHAKE TASK");
-        info!("========================================");
+        info!("STARTING PERIODIC HANDSHAKE TASK...");
         let bft_handle_for_heartbeat = bft_handle.clone();
         let root_chain_peer_for_heartbeat = root_chain_peer;
         let partition_id_for_heartbeat = self.config.network.partition_id;
@@ -699,7 +744,6 @@ impl UniEvmNode {
         let handshake_interval_secs = 30*60;
 
         info!("Handshake will be re-sent every {} seconds", handshake_interval_secs);
-        info!("This ensures UC feed subscription remains active");
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(handshake_interval_secs));
@@ -711,7 +755,7 @@ impl UniEvmNode {
             loop {
                 interval.tick().await;
 
-                info!("📡 Periodic handshake: Re-subscribing to UC feed");
+                info!("Periodic handshake: Re-subscribing to UC feed");
 
                 if let Err(e) = bft_handle_for_heartbeat.send_handshake(
                     root_chain_peer_for_heartbeat,
@@ -719,8 +763,6 @@ impl UniEvmNode {
                     node_id_for_heartbeat.clone(),
                 ).await {
                     warn!("Failed to send periodic handshake: {}", e);
-                } else {
-                    // info!("✓ Periodic handshake sent successfully");
                 }
             }
         });

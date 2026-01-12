@@ -103,6 +103,20 @@ impl BlockProducer {
         }
     }
 
+    /// Roll back to the state identified by a repeat UC
+    ///
+    /// Called when BFT Core rejects block certification(s) via a repeat UC.
+    /// The UC's InputRecord.Hash tells us the last certified state.
+    /// We roll back to that state by deleting all blocks after it.
+    ///
+    /// # Arguments
+    /// * `target_state_root` - The state root from UC.InputRecord.Hash
+    pub async fn rollback_to_state(&self, target_state_root: H256) -> Result<(), BlockProducerError> {
+        // Call store's rollback method
+        self.store.rollback_to_state(target_state_root).await?;
+        Ok(())
+    }
+
     /// Start block production loop
     /// SYNCHRONOUS: Wait for transactions → Produce block → Wait for UC → Repeat
     pub async fn run(mut self) -> Result<(), BlockProducerError> {

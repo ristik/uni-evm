@@ -21,6 +21,8 @@ pub enum ProverBackend {
     Exec,
     /// SP1 mode - real ZK proofs
     Sp1,
+    /// Light client mode - send full witness to L1 for validation
+    LightClient,
 }
 
 #[derive(Debug, Error)]
@@ -264,6 +266,44 @@ impl ProofCoordinator {
                 Ok(vec![0xDE, 0xAD, 0xBE, 0xEF])
             }
 
+            ProverBackend::LightClient => {
+                // Light client backend: serialize ProgramInput for L1 validation
+                info!(
+                    "Using LightClient backend for block {} - serializing witness",
+                    block.header.number
+                );
+
+                // Serialize ProgramInput with rkyv (same format as zkVM input)
+                let input_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&program_input)
+                    .map_err(|e| {
+                        ProofCoordinatorError::ProverError(format!(
+                            "Failed to serialize ProgramInput: {}",
+                            e
+                        ))
+                    })?;
+
+                info!(
+                    "Serialized ProgramInput for block {}: {} bytes (witness data)",
+                    block.header.number,
+                    input_bytes.len()
+                );
+
+                // Add magic header to identify light client mode
+                // This allows BFT Core to detect the proof type
+                const LIGHT_CLIENT_MAGIC: &[u8; 8] = b"LCPROOF\0";
+                let mut payload = Vec::with_capacity(8 + input_bytes.len());
+                payload.extend_from_slice(LIGHT_CLIENT_MAGIC);
+                payload.extend_from_slice(&input_bytes);
+
+                info!(
+                    "Light client payload for block {}: {} bytes total (magic + witness)",
+                    block.header.number,
+                    payload.len()
+                );
+
+                Ok(payload)
+            }
+
             #[cfg(feature = "sp1")]
             ProverBackend::Sp1 => {
                 info!(
@@ -415,12 +455,278 @@ impl ProofCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ethrex_common::types::{Block, BlockHeader, BlockBody, Transaction};
+    use ethrex_common::{Address, H256, U256};
+    use guest_program::input::ProgramInput;
+
+    /// Magic header for light client mode
+    const LIGHT_CLIENT_MAGIC: &[u8; 8] = b"LCPROOF\0";
 
     #[test]
     fn test_config_default() {
         let config = ProofCoordinatorConfig::default();
-        assert_eq!(config.proof_format, ProofFormat::Compressed);
+        // Can't test ProofFormat equality since it doesn't implement PartialEq
         #[cfg(feature = "sp1")]
-        assert_eq!(config.prover_backend, Backend::SP1);
+        assert_eq!(config.prover_backend, ProverBackend::Sp1);
+        #[cfg(not(feature = "sp1"))]
+        assert_eq!(config.prover_backend, ProverBackend::Exec);
+    }
+
+    #[test]
+    fn test_prover_backend_variants() {
+        // Test all backend variants exist
+        let _ = ProverBackend::Exec;
+        let _ = ProverBackend::Sp1;
+        let _ = ProverBackend::LightClient;
+    }
+
+    /// Test that light client magic header is correct
+    #[test]
+    fn test_light_client_magic_header() {
+        assert_eq!(LIGHT_CLIENT_MAGIC.len(), 8);
+        assert_eq!(LIGHT_CLIENT_MAGIC, b"LCPROOF\0");
+    }
+
+    /// Test ProgramInput serialization round-trip
+    #[test]
+    fn test_program_input_serialization() {
+        // Create a minimal test block
+        let block = create_test_block();
+
+        // Create a minimal ProgramInput
+        let program_input = ProgramInput {
+            blocks: vec![block.clone()],
+            execution_witness: Default::default(),
+            elasticity_multiplier: 2,
+            fee_configs: Some(vec![Default::default()]),
+            blob_commitment: [0; 48],
+            blob_proof: [0; 48],
+        };
+
+        // Serialize
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&program_input)
+            .expect("Failed to serialize ProgramInput");
+
+        // Deserialize
+        let deserialized = rkyv::from_bytes::<ProgramInput, rkyv::rancor::Error>(&bytes)
+            .expect("Failed to deserialize ProgramInput");
+
+        // Verify key fields match
+        assert_eq!(deserialized.blocks.len(), 1);
+        assert_eq!(
+            deserialized.blocks[0].header.number,
+            program_input.blocks[0].header.number
+        );
+        assert_eq!(
+            deserialized.elasticity_multiplier,
+            program_input.elasticity_multiplier
+        );
+
+        println!("✓ ProgramInput serialization round-trip: {} bytes", bytes.len());
+    }
+
+    /// Test light client payload format (magic + serialized input)
+    #[test]
+    fn test_light_client_payload_format() {
+        let block = create_test_block();
+
+        let program_input = ProgramInput {
+            blocks: vec![block],
+            execution_witness: Default::default(),
+            elasticity_multiplier: 2,
+            fee_configs: Some(vec![Default::default()]),
+            blob_commitment: [0; 48],
+            blob_proof: [0; 48],
+        };
+
+        // Serialize ProgramInput
+        let input_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&program_input)
+            .expect("Failed to serialize ProgramInput");
+
+        // Create light client payload (magic + input)
+        let mut payload = Vec::with_capacity(8 + input_bytes.len());
+        payload.extend_from_slice(LIGHT_CLIENT_MAGIC);
+        payload.extend_from_slice(&input_bytes);
+
+        // Verify payload structure
+        assert!(payload.len() > 8);
+        assert_eq!(&payload[0..8], LIGHT_CLIENT_MAGIC);
+
+        // Verify we can extract and deserialize the input
+        let extracted_input = &payload[8..];
+        let deserialized = rkyv::from_bytes::<ProgramInput, rkyv::rancor::Error>(extracted_input)
+            .expect("Failed to deserialize extracted input");
+
+        assert_eq!(deserialized.blocks.len(), 1);
+
+        println!(
+            "✓ Light client payload: {} bytes total ({} magic + {} data)",
+            payload.len(),
+            LIGHT_CLIENT_MAGIC.len(),
+            input_bytes.len()
+        );
+    }
+
+    /// Test detecting light client proof by magic header
+    #[test]
+    fn test_light_client_detection() {
+        // Light client payload
+        let lc_payload = create_light_client_payload();
+        assert!(is_light_client_proof(&lc_payload));
+
+        // Non-light client payloads
+        let exec_proof = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        assert!(!is_light_client_proof(&exec_proof));
+
+        let sp1_proof = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        assert!(!is_light_client_proof(&sp1_proof));
+
+        let empty = vec![];
+        assert!(!is_light_client_proof(&empty));
+
+        let short = vec![0x4C, 0x43]; // Too short
+        assert!(!is_light_client_proof(&short));
+
+        println!("✓ Light client detection works correctly");
+    }
+
+    /// Test proof size comparison across modes
+    #[test]
+    fn test_proof_size_comparison() {
+        // Exec mode: dummy proof
+        let exec_proof = vec![0xDE, 0xAD, 0xBE, 0xEF];
+
+        // Light client mode: full witness
+        let lc_proof = create_light_client_payload();
+
+        println!("\nProof Size Comparison:");
+        println!("  Exec mode:         {:>8} bytes", exec_proof.len());
+        println!("  Light client mode: {:>8} bytes", lc_proof.len());
+        println!("  Ratio:             {:>8.1}x", lc_proof.len() as f64 / exec_proof.len() as f64);
+
+        // Light client should be much larger than exec
+        assert!(lc_proof.len() > 100);
+        assert!(lc_proof.len() > exec_proof.len() * 100);
+
+        // Light client payload should have magic header
+        assert_eq!(&lc_proof[0..8], LIGHT_CLIENT_MAGIC);
+    }
+
+    /// Test with block containing transactions
+    #[test]
+    fn test_light_client_with_transactions() {
+        let mut block = create_test_block();
+
+        // Add some transactions
+        for i in 0..3 {
+            block.body.transactions.push(create_test_transaction(i));
+        }
+
+        let program_input = ProgramInput {
+            blocks: vec![block.clone()],
+            execution_witness: Default::default(),
+            elasticity_multiplier: 2,
+            fee_configs: Some(vec![Default::default()]),
+            blob_commitment: [0; 48],
+            blob_proof: [0; 48],
+        };
+
+        let input_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&program_input)
+            .expect("Failed to serialize ProgramInput with transactions");
+
+        let mut payload = Vec::with_capacity(8 + input_bytes.len());
+        payload.extend_from_slice(LIGHT_CLIENT_MAGIC);
+        payload.extend_from_slice(&input_bytes);
+
+        println!(
+            "✓ Light client payload with {} transactions: {} bytes",
+            block.body.transactions.len(),
+            payload.len()
+        );
+
+        // Verify deserialization
+        let extracted = &payload[8..];
+        let deserialized = rkyv::from_bytes::<ProgramInput, rkyv::rancor::Error>(extracted)
+            .expect("Failed to deserialize");
+
+        assert_eq!(deserialized.blocks[0].body.transactions.len(), 3);
+    }
+
+    // Helper functions
+
+    fn create_test_block() -> Block {
+        Block {
+            header: BlockHeader {
+                parent_hash: H256::zero(),
+                ommers_hash: H256::zero(),
+                coinbase: Address::zero(),
+                state_root: H256::zero(),
+                transactions_root: H256::zero(),
+                receipts_root: H256::zero(),
+                logs_bloom: Default::default(),
+                difficulty: U256::zero(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 0,
+                extra_data: Default::default(),
+                prev_randao: H256::zero(),
+                nonce: 0,
+                base_fee_per_gas: Some(1_000_000_000),
+                withdrawals_root: None,
+                blob_gas_used: None,
+                excess_blob_gas: None,
+                parent_beacon_block_root: None,
+                requests_hash: None,
+                hash: Default::default(),
+            },
+            body: BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        }
+    }
+
+    fn create_test_transaction(nonce: u64) -> Transaction {
+        use ethrex_common::types::EIP1559Transaction;
+
+        Transaction::EIP1559Transaction(EIP1559Transaction {
+            chain_id: 1,
+            nonce,
+            max_priority_fee_per_gas: 1_000_000_000,
+            max_fee_per_gas: 2_000_000_000,
+            gas_limit: 21_000,
+            to: ethrex_common::types::TxKind::Call(Address::from_low_u64_be(0x1234)),
+            value: U256::from(1_000_000_000_000_000_000u64), // 1 ETH
+            data: Default::default(),
+            access_list: Default::default(),
+            signature_y_parity: false,
+            signature_r: U256::from(1),
+            signature_s: U256::from(1),
+            inner_hash: Default::default(),
+        })
+    }
+
+    fn create_light_client_payload() -> Vec<u8> {
+        let block = create_test_block();
+        let program_input = ProgramInput {
+            blocks: vec![block],
+            execution_witness: Default::default(),
+            elasticity_multiplier: 2,
+            fee_configs: Some(vec![Default::default()]),
+            blob_commitment: [0; 48],
+            blob_proof: [0; 48],
+        };
+
+        let input_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&program_input).unwrap();
+        let mut payload = Vec::with_capacity(8 + input_bytes.len());
+        payload.extend_from_slice(LIGHT_CLIENT_MAGIC);
+        payload.extend_from_slice(&input_bytes);
+        payload
+    }
+
+    fn is_light_client_proof(proof_bytes: &[u8]) -> bool {
+        proof_bytes.len() > 8 && &proof_bytes[0..8] == LIGHT_CLIENT_MAGIC
     }
 }

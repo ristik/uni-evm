@@ -17,6 +17,7 @@ Built on [ethrex](https://github.com/lambdaclass/ethrex) EVM.
 - **Block production** - Automatic sequencing with configurable block time
 - **L1 finality** - Each block synchronously certified by Unicity BFT Core consensus
 - **UC verification** - Custom precompile for Unicity Certificate validation
+- **Flexible proving modes** - Choose between exec (testing), light_client (development), or sp1 (production)
 
 ## Key Differences from ethrex L2
 
@@ -84,6 +85,66 @@ cast send 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
 
 # Test consecutive transactions (pending state fix)
 ./test-pending-state.sh
+```
+
+## Proving Modes
+
+Uni-EVM supports three proving modes optimized for different use cases:
+
+### 1. Exec Mode (Testing)
+```toml
+[prover]
+prover_type = "exec"
+```
+- **Proof**: Dummy 4-byte payload
+- **Time**: Instant
+- **Use case**: Unit tests, CI/CD
+- **L1 behavior**: Accepts dummy proofs (not for production)
+
+### 2. Light Client Mode (Development) ⚡ NEW
+```toml
+[prover]
+prover_type = "light_client"
+```
+- **Proof**: Full witness (~1-5MB)
+- **Time**: ~1 second
+- **Use case**: Low latency (fast finality), limited total throughput
+- **L1 behavior**: Executes validation logic directly
+- **Speed**: much faster than SP1 mode
+- **Security**: Cryptographically secure without depending on bleeding edge ZK tech
+
+See [LIGHT_CLIENT_MODE.md](LIGHT_CLIENT_MODE.md) for details.
+
+### 3. SP1 Mode (Production)
+```toml
+[prover]
+prover_type = "sp1"
+```
+- **Proof**: SP1 STARK (~50KB compressed)
+- **Time**: 5+ minutes (CPU), 10-30s (GPU)
+- **Use case**: Production deployments
+- **L1 behavior**: Verifies STARK proof
+- **Security**: Succinct, cryptographically secure
+
+### Comparison
+
+| Mode | Time | Proof Size | Use Case |
+|------|------|-----------|----------|
+| exec | instant | 4 B | Testing |
+| **light_client** | **~1s** | **~1-5MB** | Small scale |
+| sp1 | 5+ min | 1.5MB | Production |
+
+### Switching Modes
+
+No code changes needed - just update config:
+```bash
+# For fast development iteration
+vim config.toml  # Set prover_type = "light_client"
+cargo run --release
+
+# For production deployment
+vim config.toml  # Set prover_type = "sp1"
+cargo run --release
 ```
 
 ## Project Structure

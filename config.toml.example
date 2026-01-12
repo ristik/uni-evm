@@ -23,10 +23,14 @@ libp2p_listen_addr = "/ip4/0.0.0.0/tcp/9000"
 signing_key_path = "./keys/signing.key"
 
 [prover]
-# Prover type: sp1, risc0, etc.
-prover_type = "sp1"
+# Prover type:
+#   "exec"         - Dummy proof (4 bytes) for testing, instant
+#   "light_client" - Send full witness to L1 (~1-5MB), ~1 second
+#   "sp1"          - ZK proof (~50KB), 5+ minutes
+prover_type = "light_client"
 
-# Proof format: compressed (recommended) or groth16
+# Proof format: compressed (recommended for BFT Core)
+# Only used for SP1 mode
 proof_format = "compressed"
 
 # Optional: Remote prover endpoint
