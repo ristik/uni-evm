@@ -1,3 +1,4 @@
 [submodule "ethrex"]
 	path = ethrex
-	url = https://github.com/lambdaclass/ethrex.git
+	url = git@github.com:ristik/ethrex.git
+	branch = uni-evm
