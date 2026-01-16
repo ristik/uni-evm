@@ -406,11 +406,9 @@ impl BftCommitter {
 
     /// Sign a certification request with secp256k1
     fn sign_request(&self, req: &BlockCertificationRequest) -> Result<Vec<u8>> {
-        // Serialize request for signing (excluding signature AND zk_proof fields)
-        // BFT Core excludes both when computing the signature
+        // Serialize request for signing (excluding signature)
         let mut req_copy = req.clone();
         req_copy.signature = None;  // CBOR null (f6) instead of empty byte string (40)
-        req_copy.zk_proof = None;   // CBOR null (f6) instead of empty byte string (40)
 
         let bytes = crate::cbor::serialize_certification_request(&req_copy)?;
 
