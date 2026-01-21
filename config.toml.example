@@ -4,7 +4,10 @@
 partition_id = 8
 shard_id = 128  # 0x80 (empty bitstring = default shard)
 node_id = "uni-evm-node-1"
-chain_id = 1
+
+# partitionParams.chain_id - Must match genesis.json chainId
+chain_id = 3
+
 genesis_file_path = "./genesis.json"
 
 [bft_core]
@@ -27,6 +30,11 @@ signing_key_path = "./keys/signing.key"
 #   "exec"         - Dummy proof (4 bytes) for testing, instant
 #   "light_client" - Send full witness to L1 (~1-5MB), ~1 second
 #   "sp1"          - ZK proof (~50KB), 5+ minutes
+#
+# NOTE: When using sp1 or light_client, BFT Core verifies that:
+#   1. The proof's chain_id matches partitionParams.chain_id
+#   2. State roots and block hash match the InputRecord
+# Ensure chain_id is consistent across: genesis.json, config.toml, and BFT Core partition config.
 prover_type = "light_client"
 
 # Proof format: compressed (recommended for BFT Core)

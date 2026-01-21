@@ -137,7 +137,8 @@ pub struct TechnicalRecord {
 #[derive(Debug, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct CertificationResponse {
     pub partition: u32,           // PartitionID (uint32 in Go)
-    pub shard: Vec<u8>,           // ShardID as bitstring bytes
+    #[serde(with = "serde_bytes")]
+    pub shard: Vec<u8>,           // ShardID as bitstring bytes (must be CBOR byte string)
     pub technical: TechnicalRecord,
     pub uc: UnicityCertificate,
 }
@@ -148,7 +149,8 @@ pub struct CertificationResponse {
 #[derive(Debug, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct Handshake {
     pub partition_id: u32,        // PartitionID
-    pub shard_id: Vec<u8>,        // ShardID as bitstring bytes
+    #[serde(with = "serde_bytes")]
+    pub shard_id: Vec<u8>,        // ShardID as bitstring bytes (must be CBOR byte string)
     pub node_id: String,          // libp2p peer ID as string
 }
 

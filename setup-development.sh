@@ -28,14 +28,17 @@ YELLOW=$(printf '\033[1;33m')
 NC=$(printf '\033[0m')         # No Colour
 
 # ---- Configuration ------------------------------------------------
-NETWORK_ID=3                     # must match genesis.json & trust‑base
+NETWORK_ID=3                     # must match trust‑base. note that genesis.json's chain_id is per-partition and not related
 PARTITION_ID=8
 PARTITION_TYPE_ID=8
 T2_TIMEOUT_MS=900000            # 15 min in ms (BFT Core expects ms)
-EPOCH_START=10
+EPOCH_START=0
 
 PROOF_TYPE="light_client"       # "" | sp1 | light_client | exec
-VKEY_PATH=""                    # required only for sp1, e.g. /etc/bft-core/uni‑evm-vkey.bin
+VKEY_PATH=""                    # required only for sp1, e.g. /etc/bft-core/uni-evm-vkey.bin
+
+# EVM chain configuration (must match genesis.json chainId)
+EVM_CHAIN_ID=3
 
 # Paths (relative to repo root)
 BFT_ROOT_DIR="./bft-core/test-nodes/root1"
@@ -122,20 +125,31 @@ generate_trust_base() {
 init_uni_evm_node() {
     step "Initialising uni‑evm shard node"
 
-    if [[ -f "$UNI_EVM_DIR/node-info.json" ]]; then
-        echo -e "${YELLOW}uni‑evm already initialised → skip${NC}"
-        return
+    if [[ ! -f "$UNI_EVM_DIR/node-info.json" ]]; then
+        mkdir -p "$UNI_EVM_DIR"
+        $BFT_BUILD shard-node init --home "$UNI_EVM_DIR" --generate
     fi
 
-    mkdir -p "$UNI_EVM_DIR"
-    $BFT_BUILD shard-node init --home "$UNI_EVM_DIR" --generate
-    echo -e "${GREEN}✓ uni‑evm node ready${NC}"
+    # Sync keys and update config.toml
+    mkdir -p ./keys
+    jq -r '.authKey.privateKey' "$UNI_EVM_DIR/keys.json" | sed 's/^0x//' > ./keys/auth.key
+    jq -r '.sigKey.privateKey' "$UNI_EVM_DIR/keys.json" | sed 's/^0x//' > ./keys/signing.key
+    chmod 600 ./keys/auth.key ./keys/signing.key
+
+    # Update config.toml with correct IDs
+    local evm_node=$(jq -r '.nodeId' "$UNI_EVM_DIR/node-info.json")
+    local root_node=$(jq -r '.nodeId' "$BFT_ROOT_DIR/node-info.json")
+    sed -i '' "s/^node_id = .*/node_id = \"$evm_node\"/" ./config.toml
+    sed -i '' "s/^root_chain_peers = .*/root_chain_peers = [\"$root_node\"]/" ./config.toml
+    sed -i '' "s|^root_chain_addrs = .*|root_chain_addrs = [\"/ip4/127.0.0.1/tcp/$ROOT_P2P_PORT/p2p/$root_node\"]|" ./config.toml
+    echo -e "${GREEN}✓ uni‑evm node + keys + config.toml synced${NC}"
 }
 
 inject_partition_params() {
     local json_file=$1   # path to the just‑created shard‑conf.json
     local proof_type=$2
     local vkey_path=$3
+    local chain_id=$4    # EVM chain ID for ZK proof verification
 
     if [[ -z $proof_type ]]; then
         echo "  Proof type: (none – m‑of‑n only)"
@@ -143,9 +157,18 @@ inject_partition_params() {
     fi
 
     echo "  Proof type: $proof_type"
-    # Build a tiny JSON snippet that we will merge into the shard‑conf
-    local params="{\"proof_type\":\"$proof_type\"}"
-    [[ $proof_type == sp1 && -n $vkey_path ]] && params="{\"proof_type\":\"sp1\",\"vkey_path\":\"$vkey_path\"}"
+    echo "  Chain ID:   $chain_id"
+
+    # Build JSON snippet with partition params for ZK verification
+    # chain_id is required for sp1 and light_client modes to verify proof public values
+    local params
+    if [[ $proof_type == sp1 && -n $vkey_path ]]; then
+        params="{\"proof_type\":\"sp1\",\"vkey_path\":\"$vkey_path\",\"chain_id\":\"$chain_id\"}"
+    elif [[ $proof_type == light_client ]]; then
+        params="{\"proof_type\":\"light_client\",\"chain_id\":\"$chain_id\"}"
+    else
+        params="{\"proof_type\":\"$proof_type\"}"
+    fi
 
     # jq merges the new object under .partitionParams
     jq --argjson p "$params" '.partitionParams = $p' "$json_file" > "${json_file}.tmp"
@@ -170,7 +193,7 @@ generate_shard_config() {
         --epoch-start "$EPOCH_START" \
         --node-info "$UNI_EVM_DIR/node-info.json"
 
-    inject_partition_params "$conf" "$PROOF_TYPE" "$VKEY_PATH"
+    inject_partition_params "$conf" "$PROOF_TYPE" "$VKEY_PATH" "$EVM_CHAIN_ID"
     echo -e "${GREEN}✓ shard‑conf written to $conf${NC}"
 }
 
@@ -212,6 +235,7 @@ start_root_node() {
         --home "$BFT_ROOT_DIR" \
         --address "/ip4/127.0.0.1/tcp/$ROOT_P2P_PORT" \
         --trust-base "$GENESIS_DIR/trust-base.json" \
+        --shard-conf "$GENESIS_DIR/shard-conf-${PARTITION_ID}_0.json" \
         --rpc-server-address "localhost:$ROOT_RPC_PORT" \
         --log-level DEBUG --log-format text --log-file bft-root.log \
         > ./bft-root.out 2>&1 &
@@ -266,6 +290,7 @@ ${GREEN}Configuration:${NC}
   Partition ID    : $PARTITION_ID
   Partition Type  : $PARTITION_TYPE_ID
   T2 timeout      : $(($T2_TIMEOUT_MS/60000))m ($T2_TIMEOUT_MS ms)
+  EVM Chain ID    : $EVM_CHAIN_ID
   Proof type      : ${PROOF_TYPE:-none}
   Vkey path       : ${VKEY_PATH:-N/A}
 
@@ -281,11 +306,6 @@ Generated files:
   $GENESIS_DIR/shard-conf-${PARTITION_ID}_0.json
   $UNI_EVM_DIR/state.cbor
 
-Next steps (quick cheat‑sheet):
-  1. Update ./config.toml with the peer IDs above.
-  2. Build uni‑evm:   cargo build --release
-  3. Run uni‑evm:    ./target/release/uni-evm
-  4. Stop root node: pkill -f "ubft root-node"
 EOF
 }
 
