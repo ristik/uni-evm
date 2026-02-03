@@ -1,0 +1,31 @@
+# Fork (separate git repository)
+ethrex/
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Configuration
+config.toml
+keys/
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+data/

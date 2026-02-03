@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents (Claude Code, etc.) when working with code in this repository.
 
 ## Overview
 
@@ -39,7 +39,7 @@ cargo run --release
 
 ```
 uni-evm/
-├── ethrex/                    # Git submodule - DO NOT MODIFY
+├── ethrex/                    # Fork of lambdaclass/ethrex (separate git repo)
 ├── crates/
 │   ├── uni-bft-committer/    # L1 integration via libp2p/CBOR
 │   ├── uni-bft-precompile/   # EVM precompile for Unicity Certificates
@@ -235,7 +235,7 @@ Edit `config.toml`: `prover_type = "exec"`
 
 ## Important Notes
 
-- **DO NOT modify ethrex submodule** - it's a frozen upstream dependency
+- **ethrex is a fork** - it's a separate git repository at `git@github.com:ristik/ethrex.git` (branch: uni-evm). Changes to ethrex should be committed in that repo, then pushed separately
 - **Genesis chain_id must match config** - node validates consistency on startup
 - **BFT Core peer IDs** in config.toml must be actual libp2p peer IDs from running BFT Core nodes
 - **Block time must account for proving** - if `block_time_ms < proof_generation_time`, blocks will queue

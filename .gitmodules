@@ -1,4 +1,0 @@
-[submodule "ethrex"]
-	path = ethrex
-	url = git@github.com:ristik/ethrex.git
-	branch = uni-evm

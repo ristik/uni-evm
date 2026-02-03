@@ -6,17 +6,29 @@ Communications and consensus model by https://github.com/unicitynetwork/specs/bl
 
 Built on [ethrex](https://github.com/lambdaclass/ethrex) EVM.
 
+## Repos:
+
+Main: https://github.com/ristik/uni-evm
+BFT Core (proof verification) https://github.com/unicitynetwork/bft-core/tree/l1
+bft-go-base needs some limits adjusted: https://github.com/unicitynetwork/bft-go-base/tree/l2
+ethrex (state rollback, builtins): https://github.com/ristik/ethrex/tree/uni-evm
+
+Design: https://github.com/unicitynetwork/specs/blob/main/evm/uni-evm.pdf
+
+
 ## What It Does
 
 **Full EVM blockchain** with:
 - **EVM execution** - Complete smart contract support (ethrex VM)
 - **State management** - MPT state trie, accounts, storage (ethrex storage)
-- **ZK proving** - SP1 proofs for every block (ethrex-prover)
-- **zkVM guest verifier** - generates execution trace for proving
+- **Validation modes**
+    - **zkVM guest verifier** - SP1 proofs for every block (ethrex-prover)
+    - **L1 Light Client validation** - L1 as stateless light client with full block validation
+    - **L2 Majority Voting** - L2 honest majority assumption tx validation (BFT Core's default)
 - **JSON-RPC API** - 18 standard RPC endpoints
 - **Block production** - Automatic sequencing with configurable block time
 - **L1 finality** - Each block synchronously certified by Unicity BFT Core consensus
-- **UC verification** - Custom precompile for Unicity Certificate validation
+- **UC verification** - Custom precompile for Unicity Certificate validation, trust anchor to validate Unicity L3 artefacts
 - **Flexible proving modes** - Choose between exec (testing), light_client (development), or sp1 (production)
 
 ## Key Differences from ethrex L2
@@ -151,7 +163,7 @@ cargo run --release
 
 ```
 uni-evm/
-├── ethrex/                      # Git submodule - DO NOT MODIFY
+├── ethrex/                      # Fork of lambdaclass/ethrex (separate repo)
 │   ├── crates/vm/              # EVM execution
 │   ├── crates/storage/         # State management
 │   ├── crates/blockchain/      # Block validation
@@ -302,7 +314,7 @@ cast send <recipient> --value 1ether --private-key <key> --rpc-url http://localh
 ## Documentation
 
 **Implementation docs:**
-- `CLAUDE.md` - Development guide for Claude Code
+- `AGENTS.md` - Development guide for AI coding agents
 - `crates/uni-bft-precompile/INTEGRATION.md` - Precompile integration
 - https://github.com/unicitynetwork/bft-core/blob/l1/rootchain/consensus/zkverifier/sp1-verifier-ffi/README.md
 - https://github.com/unicitynetwork/bft-core/blob/l1/rootchain/consensus/zkverifier/FFI_INTEGRATION.md
