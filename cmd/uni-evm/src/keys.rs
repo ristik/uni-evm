@@ -3,18 +3,18 @@
 //! Supports loading signing keys from:
 //! - Environment variable: UNI_EVM_SIGNING_KEY
 //! - File path specified in config
-//! - Auto-generation with warning (dev mode only)
 
 use anyhow::{Context, Result, anyhow};
 use secp256k1::{PublicKey, SecretKey, Secp256k1};
 use std::fs;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Load signing key with the following precedence:
 /// 1. Environment variable UNI_EVM_SIGNING_KEY (hex-encoded)
 /// 2. File at signing_key_path (hex-encoded)
-/// 3. Generate new key (with warning)
+///
+/// Returns error if no key is found - keys are required for operation.
 pub fn load_signing_key(signing_key_path: &str) -> Result<SecretKey> {
     // Try environment variable first
     if let Ok(key_hex) = std::env::var("UNI_EVM_SIGNING_KEY") {
@@ -33,21 +33,15 @@ pub fn load_signing_key(signing_key_path: &str) -> Result<SecretKey> {
             .context("Failed to parse signing key from file");
     }
 
-    // Generate new key as fallback (dev mode only)
-    warn!("⚠️  No signing key found!");
-    warn!("⚠️  Generating new random key - THIS IS FOR DEVELOPMENT ONLY");
-    warn!("⚠️  In production, set UNI_EVM_SIGNING_KEY env var or create key file at: {}", signing_key_path);
-
-    let secret_key = SecretKey::new(&mut rand::thread_rng());
-
-    // Save the generated key for convenience
-    if let Err(e) = save_secret_key(&secret_key, path) {
-        warn!("Failed to save generated key to {}: {}", signing_key_path, e);
-    } else {
-        info!("Generated key saved to: {}", signing_key_path);
-    }
-
-    Ok(secret_key)
+    // No key found - fail
+    Err(anyhow!(
+        "No signing key found. Either:\n\
+         1. Set UNI_EVM_SIGNING_KEY environment variable (hex-encoded), or\n\
+         2. Create key file at: {}\n\
+         \n\
+         Generate keys using: uni-evm generate-key --output {}",
+        signing_key_path, signing_key_path
+    ))
 }
 
 /// Parse a hex-encoded secret key (with or without 0x prefix)
@@ -115,8 +109,6 @@ pub fn generate_and_save_key(path: &Path) -> Result<SecretKey> {
     println!("  Secret key: {}", hex::encode(secret_key.secret_bytes()));
     println!("  Public key: {}", format_public_key(&public_key));
     println!("  Saved to: {}", path.display());
-    println!();
-    println!("⚠️  Keep the secret key secure and never share it!");
 
     Ok(secret_key)
 }

@@ -490,6 +490,9 @@ impl UniEvmNode {
             root_chain_peer,
         };
 
+        // Track if we have a stored UC before moving it
+        let had_stored_uc = last_uc.is_some();
+
         let bft_committer = Arc::new(Mutex::new(BftCommitter::new(
             committer_config,
             bft_handle.clone(),
@@ -516,10 +519,10 @@ impl UniEvmNode {
 
         info!("✓ Handshake sent - waiting for UC feed subscription...");
 
-        // Wait for first UC from subscription to arrive
-        // BFT Core should send latest UC (e.g., round 481) + TechnicalRecord
-        info!("Waiting for first UC from BFT Core (up to 5 seconds)...");
-        let timeout = tokio::time::Duration::from_secs(5);
+        // Wait for first UC from subscription to arrive for synchronization
+        const UC_SYNC_TIMEOUT_SECS: u64 = 30;
+        info!("Waiting for first UC from BFT Core (up to {} seconds)...", UC_SYNC_TIMEOUT_SECS);
+        let timeout = tokio::time::Duration::from_secs(UC_SYNC_TIMEOUT_SECS);
         let start = tokio::time::Instant::now();
         let mut luc_received = false;
 
@@ -562,9 +565,16 @@ impl UniEvmNode {
             } else {
                 (0, 0)
             };
-            info!("Received UC from BFT Core: round {}, next expected round {}", uc_round, next_round);
+            info!("✓ Received UC from BFT Core: round {}, next expected round {}", uc_round, next_round);
+        } else if !had_stored_uc {
+            // No UC from storage AND no UC from BFT Core - cannot proceed
+            error!("❌ Failed to receive Unicity Certificate from BFT Core within {} seconds", UC_SYNC_TIMEOUT_SECS);
+            return Err(anyhow::anyhow!(
+                "Failed to synchronize with BFT Core: no UC received within {} seconds.", UC_SYNC_TIMEOUT_SECS
+            ));
         } else {
-            warn!("No UC received from handshake within timeout - may need sync UC");
+            // Have UC from storage, can continue without fresh sync
+            info!("Using stored UC for initialization (no fresh sync from BFT Core)");
         }
 
         // ========================================
@@ -683,7 +693,7 @@ impl UniEvmNode {
                             }
 
                             if !certified {
-                                warn!("⚠️  Genesis certification timeout - continuing anyway");
+                                warn!("Genesis certification timeout");
                             }
                         }
                         Err(e) => {
@@ -774,7 +784,7 @@ impl UniEvmNode {
         info!("Initializing Block Producer...");
         let block_producer_config = BlockProducerConfig {
             block_time_ms: self.config.sequencer.block_time_ms,
-            coinbase_address: ethrex_common::Address::zero(), // TODO: configure
+            coinbase_address: ethrex_common::Address::zero(), // no block rewards - no mining here
             gas_limit: self.config.sequencer.gas_limit,
             elasticity_multiplier: 2,
         };
