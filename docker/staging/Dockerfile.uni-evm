@@ -1,0 +1,95 @@
+# uni-evm Docker Build
+# Multi-stage build for light client mode staging deployment
+
+# ============================================================================
+# Stage 1: Rust Build Environment
+# ============================================================================
+FROM rust:1.90 AS chef
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libclang-dev \
+    libc6 \
+    libssl-dev \
+    ca-certificates \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install cargo-chef
+WORKDIR /app
+
+# ============================================================================
+# Stage 2: Dependency Planning
+# ============================================================================
+FROM chef AS planner
+
+# Copy source files for dependency resolution
+# Workspace members: cmd/uni-evm, crates/*, guest-program
+COPY Cargo.toml ./
+COPY crates ./crates
+COPY cmd ./cmd
+COPY guest-program ./guest-program
+COPY ethrex/benches ./ethrex/benches
+COPY ethrex/crates ./ethrex/crates
+COPY ethrex/cmd ./ethrex/cmd
+COPY ethrex/metrics ./ethrex/metrics
+COPY ethrex/Cargo.toml ./ethrex/
+
+# Generate Cargo.lock if it doesn't exist, then prepare recipe
+RUN cargo generate-lockfile || true
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ============================================================================
+# Stage 3: Build Dependencies (cached)
+# ============================================================================
+FROM chef AS builder
+
+# Copy recipe and build dependencies first (cached layer)
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Copy full source
+COPY Cargo.toml ./
+COPY crates ./crates
+COPY cmd ./cmd
+COPY guest-program ./guest-program
+COPY ethrex ./ethrex
+
+# Build uni-evm binary (light client mode - no SP1 prover)
+ARG BUILD_FLAGS=""
+RUN cargo build --release --bin uni-evm $BUILD_FLAGS
+
+# ============================================================================
+# Stage 4: Runtime Image
+# ============================================================================
+FROM ubuntu:24.04
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 \
+    ca-certificates \
+    netcat-openbsd \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy built binary
+COPY --from=builder /app/target/release/uni-evm /app/uni-evm
+
+# Copy genesis and network configs
+COPY genesis.json /app/genesis.json
+COPY ethrex/cmd/ethrex/networks ./cmd/ethrex/networks
+
+# Create data directory
+RUN mkdir -p /app/data /app/keys
+
+# Expose ports
+# 8545: JSON-RPC HTTP
+# 9000: libp2p P2P (BFT Core)
+# 30303: Ethereum Discovery
+EXPOSE 8545 9000 30303
+
+# Default entrypoint (can be overridden in docker-compose)
+ENTRYPOINT ["/app/uni-evm"]
+CMD ["--help"]

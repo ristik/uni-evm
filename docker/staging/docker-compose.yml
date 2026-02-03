@@ -1,0 +1,649 @@
+# uni-evm Staging Environment
+# 4 BFT Core root nodes + 1 go-aggregator + 1 uni-evm (light client mode)
+#
+# Architecture:
+#   BFT Root Chain (4 nodes) - Consensus coordination
+#   └── uni-evm Partition (partition_id=8) - EVM execution with light client validation
+#   └── Aggregator Partition (partition_id=7) - Commitment aggregation
+#
+# Usage:
+#   ./setup-staging.sh     # First-time setup (generates keys, trust base, configs)
+#   docker compose up -d   # Start all services
+#   docker compose logs -f # View logs
+#   docker compose down    # Stop all services
+
+services:
+  # ============================================================================
+  # Base service definitions
+  # ============================================================================
+
+  x-bft-base: &bft-base
+    platform: linux/amd64
+    user: root
+    build:
+      context: ../../bft-core
+      dockerfile: ./scripts/Dockerfile
+    networks:
+      - staging-net
+
+  # ============================================================================
+  # Genesis Generation Services (run once, then exit)
+  # ============================================================================
+
+  # Initialize all 4 root nodes and generate trust base
+  bft-genesis:
+    <<: *bft-base
+    user: root
+    volumes:
+      - genesis:/genesis
+      - root1:/genesis/root1
+      - root2:/genesis/root2
+      - root3:/genesis/root3
+      - root4:/genesis/root4
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        set -e
+
+        # Skip if already initialized
+        if [ -f /genesis/trust-base.json ] && [ -f /genesis/root1/node-info.json ]; then
+          echo "Genesis already exists, skipping initialization."
+          exit 0
+        fi
+
+        echo "=== Initializing 4 BFT Root Nodes ==="
+
+        # Initialize each root node
+        for i in 1 2 3 4; do
+          echo "Creating root node $$i..."
+          ubft root-node init --home /genesis/root$$i --generate
+        done
+
+        echo "=== Generating Trust Base ==="
+        ubft trust-base generate \
+          --home /genesis \
+          --network-id 3 \
+          --epoch 1 \
+          --epoch-start 1 \
+          --node-info /genesis/root1/node-info.json \
+          --node-info /genesis/root2/node-info.json \
+          --node-info /genesis/root3/node-info.json \
+          --node-info /genesis/root4/node-info.json
+
+        echo "=== Signing Trust Base ==="
+        for i in 1 2 3 4; do
+          echo "Root node $$i signing trust base..."
+          ubft trust-base sign --home /genesis/root$$i --trust-base /genesis/trust-base.json
+        done
+
+        echo "=== Saving Node IDs ==="
+        # Save node IDs to shared genesis volume for other nodes to read
+        for i in 1 2 3 4; do
+          NODE_ID=$$(ubft node-id --home /genesis/root$$i | tail -n1)
+          echo "$$NODE_ID" > /genesis/root$$i-node-id.txt
+          echo "Root $$i Node ID: $$NODE_ID"
+        done
+
+        # Set permissions for other containers
+        chmod -R 755 /genesis
+
+        echo "=== Genesis Complete ==="
+        echo "Trust base created with 4 root validators"
+        cat /genesis/trust-base.json | head -50
+
+  # Initialize uni-evm partition (partition_id=8, partition_type_id=8)
+  evm-genesis:
+    <<: *bft-base
+    user: root
+    volumes:
+      - genesis:/genesis
+      - evm:/genesis/evm
+    depends_on:
+      bft-genesis:
+        condition: service_completed_successfully
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        set -e
+
+        if [ -f /genesis/shard-conf-8_0.json ] && [ -f /genesis/evm/node-info.json ]; then
+          echo "EVM partition genesis already exists, skipping."
+          exit 0
+        fi
+
+        echo "=== Creating EVM Partition Genesis ==="
+        ubft shard-node init --home /genesis/evm --generate
+
+        echo "=== Creating EVM Partition Configuration ==="
+        ubft shard-conf generate \
+          --home /genesis \
+          --network-id 3 \
+          --partition-id 8 \
+          --partition-type-id 8 \
+          --t2-timeout 15000 \
+          --epoch-start 10 \
+          --node-info /genesis/evm/node-info.json
+
+        echo "=== Creating EVM Partition State ==="
+        ubft shard-conf genesis \
+          --home /genesis/evm \
+          --shard-conf /genesis/shard-conf-8_0.json
+
+        chmod -R 755 /genesis/evm
+        chmod 644 /genesis/shard-conf-8_0.json
+
+        echo "=== EVM Partition Genesis Complete ==="
+        cat /genesis/shard-conf-8_0.json
+
+  # Initialize aggregator partition (partition_id=7, partition_type_id=7)
+  aggregator-genesis:
+    <<: *bft-base
+    user: root
+    volumes:
+      - genesis:/genesis
+      - aggregator:/genesis/aggregator
+    depends_on:
+      bft-genesis:
+        condition: service_completed_successfully
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        set -e
+
+        if [ -f /genesis/shard-conf-7_0.json ] && [ -f /genesis/aggregator/node-info.json ]; then
+          echo "Aggregator partition genesis already exists, skipping."
+          exit 0
+        fi
+
+        echo "=== Creating Aggregator Partition Genesis ==="
+        ubft shard-node init --home /genesis/aggregator --generate
+
+        echo "=== Creating Aggregator Partition Configuration ==="
+        ubft shard-conf generate \
+          --home /genesis \
+          --network-id 3 \
+          --partition-id 7 \
+          --partition-type-id 7 \
+          --t2-timeout 5000 \
+          --epoch-start 10 \
+          --node-info /genesis/aggregator/node-info.json
+
+        echo "=== Creating Aggregator Partition State ==="
+        ubft shard-conf genesis \
+          --home /genesis/aggregator \
+          --shard-conf /genesis/shard-conf-7_0.json
+
+        chmod -R 755 /genesis/aggregator
+        chmod 644 /genesis/shard-conf-7_0.json
+
+        echo "=== Aggregator Partition Genesis Complete ==="
+
+  # ============================================================================
+  # BFT Core Root Chain (4 nodes)
+  # ============================================================================
+
+  bft-root-1:
+    <<: *bft-base
+    container_name: bft-root-1
+    hostname: bft-root-1
+    volumes:
+      - genesis:/genesis:ro
+      - root1:/genesis/root1
+    depends_on:
+      bft-genesis:
+        condition: service_completed_successfully
+      evm-genesis:
+        condition: service_completed_successfully
+      aggregator-genesis:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "26662:8000"   # P2P
+      - "25866:8002"   # RPC
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        echo "=== Starting BFT Root Node 1 (Leader) ==="
+
+        # Wait a moment for filesystem sync
+        sleep 2
+
+        ubft root-node run \
+          --home /genesis/root1 \
+          --address "/ip4/0.0.0.0/tcp/8000" \
+          --trust-base /genesis/trust-base.json \
+          --shard-conf /genesis/shard-conf-8_0.json \
+          --shard-conf /genesis/shard-conf-7_0.json \
+          --rpc-server-address "0.0.0.0:8002" \
+          --log-format text \
+          --log-level debug
+
+  bft-root-2:
+    <<: *bft-base
+    container_name: bft-root-2
+    hostname: bft-root-2
+    volumes:
+      - genesis:/genesis:ro
+      - root2:/genesis/root2
+    depends_on:
+      bft-root-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "26663:8000"   # P2P
+      - "25867:8002"   # RPC
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        echo "=== Starting BFT Root Node 2 ==="
+
+        # Get node 1's peer ID for bootstrap (from shared genesis volume)
+        ROOT1_ID=$$(cat /genesis/root1-node-id.txt)
+        echo "Bootstrapping from root1: $$ROOT1_ID"
+
+        ubft root-node run \
+          --home /genesis/root2 \
+          --address "/ip4/0.0.0.0/tcp/8000" \
+          --bootnodes "/dns4/bft-root-1/tcp/8000/p2p/$$ROOT1_ID" \
+          --trust-base /genesis/trust-base.json \
+          --shard-conf /genesis/shard-conf-8_0.json \
+          --shard-conf /genesis/shard-conf-7_0.json \
+          --rpc-server-address "0.0.0.0:8002" \
+          --log-format text \
+          --log-level debug
+
+  bft-root-3:
+    <<: *bft-base
+    container_name: bft-root-3
+    hostname: bft-root-3
+    volumes:
+      - genesis:/genesis:ro
+      - root3:/genesis/root3
+    depends_on:
+      bft-root-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "26664:8000"   # P2P
+      - "25868:8002"   # RPC
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        echo "=== Starting BFT Root Node 3 ==="
+
+        ROOT1_ID=$$(cat /genesis/root1-node-id.txt)
+        echo "Bootstrapping from root1: $$ROOT1_ID"
+
+        ubft root-node run \
+          --home /genesis/root3 \
+          --address "/ip4/0.0.0.0/tcp/8000" \
+          --bootnodes "/dns4/bft-root-1/tcp/8000/p2p/$$ROOT1_ID" \
+          --trust-base /genesis/trust-base.json \
+          --shard-conf /genesis/shard-conf-8_0.json \
+          --shard-conf /genesis/shard-conf-7_0.json \
+          --rpc-server-address "0.0.0.0:8002" \
+          --log-format text \
+          --log-level debug
+
+  bft-root-4:
+    <<: *bft-base
+    container_name: bft-root-4
+    hostname: bft-root-4
+    volumes:
+      - genesis:/genesis:ro
+      - root4:/genesis/root4
+    depends_on:
+      bft-root-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "26665:8000"   # P2P
+      - "25869:8002"   # RPC
+    entrypoint: ["/busybox/sh", "-c"]
+    command:
+      - |
+        echo "=== Starting BFT Root Node 4 ==="
+
+        ROOT1_ID=$$(cat /genesis/root1-node-id.txt)
+        echo "Bootstrapping from root1: $$ROOT1_ID"
+
+        ubft root-node run \
+          --home /genesis/root4 \
+          --address "/ip4/0.0.0.0/tcp/8000" \
+          --bootnodes "/dns4/bft-root-1/tcp/8000/p2p/$$ROOT1_ID" \
+          --trust-base /genesis/trust-base.json \
+          --shard-conf /genesis/shard-conf-8_0.json \
+          --shard-conf /genesis/shard-conf-7_0.json \
+          --rpc-server-address "0.0.0.0:8002" \
+          --log-format text \
+          --log-level debug
+
+  # ============================================================================
+  # Configuration Upload Service
+  # ============================================================================
+
+  upload-configs:
+    image: curlimages/curl:8.13.0
+    depends_on:
+      bft-root-1:
+        condition: service_healthy
+      bft-root-2:
+        condition: service_healthy
+      bft-root-3:
+        condition: service_healthy
+      bft-root-4:
+        condition: service_healthy
+    volumes:
+      - genesis:/genesis:ro
+    networks:
+      - staging-net
+    restart: on-failure
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "=== Uploading Partition Configurations to All Root Nodes ==="
+
+        # Upload to all root nodes for redundancy
+        for i in 1 2 3 4; do
+          echo "Uploading EVM config to bft-root-$$i..."
+          curl -s -X PUT -H "Content-Type: application/json" \
+            -d @/genesis/shard-conf-8_0.json \
+            http://bft-root-$$i:8002/api/v1/configurations || echo "Warning: Failed to upload to root $$i"
+
+          echo "Uploading Aggregator config to bft-root-$$i..."
+          curl -s -X PUT -H "Content-Type: application/json" \
+            -d @/genesis/shard-conf-7_0.json \
+            http://bft-root-$$i:8002/api/v1/configurations || echo "Warning: Failed to upload to root $$i"
+        done
+
+        echo "=== Configuration Upload Complete ==="
+
+  # ============================================================================
+  # Aggregator Dependencies (Redis + MongoDB)
+  # ============================================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: staging-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - staging-net
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --appendfsync everysec
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mongodb:
+    image: mongo:7.0
+    container_name: staging-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    networks:
+      - staging-net
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: aggregator
+    volumes:
+      - mongodb-data:/data/db
+      - ../../aggregator-go/scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Go Aggregator Service
+  # ============================================================================
+
+  aggregator:
+    build:
+      context: ../../aggregator-go
+      dockerfile: Dockerfile
+    container_name: staging-aggregator
+    hostname: aggregator
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "9200:9000"  # libp2p P2P port
+    networks:
+      - staging-net
+    volumes:
+      - genesis:/app/bft-config:ro
+      - aggregator:/app/bft-config/aggregator:ro
+    depends_on:
+      upload-configs:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      # Server Configuration
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      CONCURRENCY_LIMIT: "1000"
+      ENABLE_DOCS: "true"
+      ENABLE_CORS: "true"
+
+      # Database Configuration
+      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_DATABASE: "aggregator"
+      MONGODB_CONNECT_TIMEOUT: "10s"
+      MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
+
+      # Redis Configuration
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: "0"
+      REDIS_POOL_SIZE: "100"
+      REDIS_MIN_IDLE_CONNS: "10"
+
+      # Storage Configuration
+      USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_FLUSH_INTERVAL: "50ms"
+      REDIS_MAX_BATCH_SIZE: "2000"
+
+      # High Availability
+      DISABLE_HIGH_AVAILABILITY: "true"
+
+      # Logging
+      LOG_LEVEL: "info"
+      LOG_FORMAT: "json"
+      LOG_ENABLE_JSON: "true"
+
+      # Processing
+      BATCH_LIMIT: "1000"
+      MAX_COMMITMENTS_PER_ROUND: "10000"
+      ROUND_DURATION: "1s"
+
+      # BFT Configuration
+      BFT_ENABLED: "true"
+      SIGNING_KEY_FILE: "/app/bft-config/aggregator/keys.json"
+      BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
+      BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+      BFT_ADDRESS: "/ip4/0.0.0.0/tcp/9000"
+      BFT_BOOTSTRAP_CONNECT_RETRY: "5"
+      BFT_BOOTSTRAP_CONNECT_RETRY_DELAY: "3"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Extract root node IDs for bootstrap
+        ROOT1_ID=$$(cat /app/bft-config/trust-base.json | grep -o '"nodeId": "[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [ -z "$$ROOT1_ID" ]; then
+          echo "ERROR: Could not extract nodeId from trust-base.json"
+          exit 1
+        fi
+
+        # Connect to multiple root nodes for redundancy
+        export BFT_BOOTSTRAP_ADDRESSES="/dns4/bft-root-1/tcp/8000/p2p/$$ROOT1_ID"
+        echo "BFT Bootstrap: $$BFT_BOOTSTRAP_ADDRESSES"
+
+        exec /app/aggregator
+
+  # ============================================================================
+  # uni-evm Node (Light Client Mode)
+  # ============================================================================
+
+  uni-evm:
+    build:
+      context: ../..
+      dockerfile: docker/staging/Dockerfile.uni-evm
+    container_name: staging-uni-evm
+    hostname: uni-evm
+    restart: unless-stopped
+    ports:
+      - "8545:8545"   # JSON-RPC
+      - "9000:9000"   # libp2p P2P
+      - "30303:30303" # Discovery
+    networks:
+      - staging-net
+    volumes:
+      - genesis:/app/bft-config:ro
+      - evm:/app/bft-config/evm:ro
+      - evm-data:/app/data
+    depends_on:
+      upload-configs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8545"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+
+        echo "=== Starting uni-evm in Light Client Mode ==="
+
+        # Extract root node ID for bootstrap
+        ROOT1_ID=$$(cat /app/bft-config/trust-base.json | grep -o '"nodeId": "[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [ -z "$$ROOT1_ID" ]; then
+          echo "ERROR: Could not extract nodeId from trust-base.json"
+          exit 1
+        fi
+
+        echo "Root Node ID: $$ROOT1_ID"
+
+        # Generate config if not exists
+        if [ ! -f /app/data/config.toml ]; then
+          echo "Generating uni-evm config..."
+
+          # Get EVM node ID from shard config
+          EVM_NODE_ID=$$(cat /app/bft-config/shard-conf-8_0.json | grep -o '"nodeId": "[^"]*"' | head -1 | cut -d'"' -f4)
+
+          cat > /app/data/config.toml << EOF
+        # uni-evm Staging Configuration
+        # Generated by docker-compose
+
+        [network]
+        partition_id = 8
+        shard_id = 128
+        node_id = "$$EVM_NODE_ID"
+        chain_id = 3
+        genesis_file_path = "/app/genesis.json"
+
+        [bft_core]
+        root_chain_peers = ["$$ROOT1_ID"]
+        root_chain_addrs = ["/dns4/bft-root-1/tcp/8000/p2p/$$ROOT1_ID"]
+        libp2p_listen_addr = "/ip4/0.0.0.0/tcp/9000"
+        signing_key_path = "/app/data/signing.key"
+        auth_key_path = "/app/data/auth.key"
+
+        [prover]
+        prover_type = "light_client"
+        proof_format = "compressed"
+
+        [sequencer]
+        block_time_ms = 5000
+        gas_limit = 30000000
+
+        [rpc]
+        http_addr = "0.0.0.0"
+        http_port = 8545
+
+        [trust_base]
+        filesystem_path = "/app/bft-config/trust-base.json"
+        bft_core_endpoint = "http://bft-root-1:8002"
+        update_interval_secs = 3000
+        EOF
+        fi
+
+        # Extract keys from BFT node keys.json (nested structure)
+        if [ ! -f /app/data/signing.key ]; then
+          echo "Extracting signing key..."
+          jq -r '.sigKey.privateKey' /app/bft-config/evm/keys.json | sed 's/^0x//' > /app/data/signing.key
+          chmod 600 /app/data/signing.key
+        fi
+
+        if [ ! -f /app/data/auth.key ]; then
+          echo "Extracting auth key..."
+          jq -r '.authKey.privateKey' /app/bft-config/evm/keys.json | sed 's/^0x//' > /app/data/auth.key
+          chmod 600 /app/data/auth.key
+        fi
+
+        echo "Starting uni-evm..."
+        exec /app/uni-evm --config /app/data/config.toml run
+
+# ============================================================================
+# Networks
+# ============================================================================
+
+networks:
+  staging-net:
+    driver: bridge
+
+# ============================================================================
+# Volumes
+# ============================================================================
+
+volumes:
+  # BFT Core volumes
+  genesis:
+  root1:
+  root2:
+  root3:
+  root4:
+
+  # Aggregator volumes
+  aggregator:
+  redis-data:
+  mongodb-data:
+
+  # uni-evm volumes
+  evm:
+  evm-data:
