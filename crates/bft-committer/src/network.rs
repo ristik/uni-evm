@@ -192,8 +192,10 @@ impl BftCoreClient {
 
         let local_peer_id = PeerId::from(local_key.public());
 
-        // Create transport
-        let transport = libp2p::tcp::tokio::Transport::default()
+        // Create transport with port reuse disabled to avoid "Address already in use" errors
+        let tcp_config = libp2p::tcp::Config::default()
+            .port_reuse(false);
+        let transport = libp2p::tcp::tokio::Transport::new(tcp_config)
             .upgrade(upgrade::Version::V1)
             .authenticate(libp2p::noise::Config::new(&local_key)?)
             .multiplex(libp2p::yamux::Config::default())
