@@ -18,7 +18,6 @@ ethereum-types.workspace = true
 # Uni-EVM crates
 uni-bft-committer.workspace = true
 uni-storage.workspace = true
-uni-evm-guest.workspace = true
 
 # SP1 proving (optional)
 sp1-sdk = { workspace = true, optional = true }
@@ -36,6 +35,6 @@ bytes.workspace = true
 
 [features]
 default = []
-sp1 = ["dep:sp1-sdk", "dep:sp1-prover", "uni-evm-guest/sp1"]
+sp1 = ["dep:sp1-sdk", "dep:sp1-prover"]
 
 [dev-dependencies]

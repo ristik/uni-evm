@@ -79,7 +79,6 @@ uni-bft-committer = { path = "./crates/bft-committer" }
 uni-bft-precompile = { path = "./crates/bft-precompile" }
 uni-sequencer = { path = "./crates/uni-sequencer" }
 uni-storage = { path = "./crates/uni-storage" }
-uni-evm-guest = { path = "./guest-program" }
 
 # SP1 proving
 sp1-sdk = "5.0.8"
@@ -100,7 +99,7 @@ clap = { version = "4.3", features = ["derive", "env"] }
 
 # BFT Core integration
 ciborium = "0.2"
-libp2p = { version = "0.54", features = ["tcp", "tokio", "noise", "yamux", "request-response", "cbor", "secp256k1", "identify"] }
+libp2p = { version = "0.54", features = ["tcp", "tokio", "noise", "yamux", "request-response", "cbor", "secp256k1", "identify", "dns"] }
 secp256k1 = { version = "0.30", features = ["global-context", "recovery", "rand"] }
 
 # Ethrex shared dependencies

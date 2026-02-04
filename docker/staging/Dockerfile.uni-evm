@@ -24,19 +24,19 @@ WORKDIR /app
 FROM chef AS planner
 
 # Copy source files for dependency resolution
-# Workspace members: cmd/uni-evm, crates/*, guest-program
+# Workspace members: cmd/uni-evm, crates/*
+# Note: guest-program is excluded
 COPY Cargo.toml ./
+COPY Cargo.lock ./
 COPY crates ./crates
 COPY cmd ./cmd
-COPY guest-program ./guest-program
 COPY ethrex/benches ./ethrex/benches
 COPY ethrex/crates ./ethrex/crates
 COPY ethrex/cmd ./ethrex/cmd
 COPY ethrex/metrics ./ethrex/metrics
 COPY ethrex/Cargo.toml ./ethrex/
 
-# Generate Cargo.lock if it doesn't exist, then prepare recipe
-RUN cargo generate-lockfile || true
+# Prepare recipe (Cargo.lock is now in git)
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ============================================================================
@@ -49,10 +49,11 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy full source
+# Note: guest-program is excluded, we're using one under ./ethrex/ if zk is enabled
 COPY Cargo.toml ./
+COPY Cargo.lock ./
 COPY crates ./crates
 COPY cmd ./cmd
-COPY guest-program ./guest-program
 COPY ethrex ./ethrex
 
 # Build uni-evm binary (light client mode - no SP1 prover)
