@@ -192,10 +192,14 @@ impl BftCoreClient {
 
         let local_peer_id = PeerId::from(local_key.public());
 
-        // Create transport with port reuse disabled to avoid "Address already in use" errors
+        // Create transport with DNS resolution support for /dns4/ multiaddrs
         let tcp_config = libp2p::tcp::Config::default()
             .port_reuse(false);
-        let transport = libp2p::tcp::tokio::Transport::new(tcp_config)
+        let tcp_transport = libp2p::tcp::tokio::Transport::new(tcp_config);
+
+        // Wrap TCP transport with DNS resolver to support /dns4/ addresses in Docker
+        let transport = libp2p::dns::tokio::Transport::system(tcp_transport)
+            .context("Failed to create DNS transport")?
             .upgrade(upgrade::Version::V1)
             .authenticate(libp2p::noise::Config::new(&local_key)?)
             .multiplex(libp2p::yamux::Config::default())

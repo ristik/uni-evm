@@ -4,8 +4,7 @@ members = [
     "crates/bft-committer",
     "crates/bft-precompile",
     "crates/uni-sequencer",
-    "crates/uni-storage",
-    "guest-program",
+    "crates/uni-storage"
 ]
 resolver = "2"
 
