@@ -51,20 +51,17 @@ This directory contains the Docker Compose setup for running a staging environme
 ## Quick Start
 
 ```bash
-# 1. Make the setup script executable (if not already)
-chmod +x setup-staging.sh
-
-# 2. Run the setup (builds images and starts all services)
+# 1. Run the setup (builds images and starts all services)
 ./setup-staging.sh
 
-# 3. Check status
+# 2. Check status
 ./setup-staging.sh --status
 
-# 4. View logs
+# 3. View logs
 ./setup-staging.sh --logs
 ./setup-staging.sh --logs uni-evm  # Specific service
 
-# 5. Stop everything
+# 4. Stop everything
 ./setup-staging.sh --down
 ```
 
@@ -76,11 +73,6 @@ The uni-evm node runs in **light client validation mode**, which:
 2. Serializes `ProgramInput` with magic header `"LCPROOF\0"`
 3. BFT Core executes validation logic directly (~100ms)
 4. Returns Unicity Certificate (UC) for block finalization
-
-This mode is ideal for:
-- Development and testing
-- Staging environments
-- Fast iteration (300x faster than SP1 mode)
 
 ## Configuration
 

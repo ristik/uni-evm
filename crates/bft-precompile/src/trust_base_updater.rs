@@ -169,17 +169,18 @@ impl TrustBaseUpdater {
     /// Update trust base from BFT Core or filesystem
     async fn update_trust_base(&self) -> Result<(), TrustBaseUpdateError> {
         // Try REST API first
-        if let Some(ref endpoint) = self.config.bft_core_endpoint {
-            match self.fetch_from_rest(endpoint).await {
-                Ok(bft_tb) => {
-                    self.apply_trust_base(bft_tb).await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!("Failed to fetch trust base from REST API: {}", e);
-                }
-            }
-        }
+        // TODO: enable when endpoint is ready
+        // if let Some(ref endpoint) = self.config.bft_core_endpoint {
+        //     match self.fetch_from_rest(endpoint).await {
+        //         Ok(bft_tb) => {
+        //             self.apply_trust_base(bft_tb).await?;
+        //             return Ok(());
+        //         }
+        //         Err(e) => {
+        //             warn!("Failed to fetch trust base from REST API: {}", e);
+        //         }
+        //     }
+        // }
 
         // Fallback to filesystem
         if let Some(ref path) = self.config.filesystem_path {

@@ -35,7 +35,6 @@ uni-bft-committer.workspace = true
 uni-bft-precompile.workspace = true
 uni-sequencer.workspace = true
 uni-storage.workspace = true
-uni-evm-guest.workspace = true
 
 # SP1 proving (optional)
 sp1-sdk = { workspace = true, optional = true }
@@ -60,6 +59,6 @@ rand.workspace = true
 
 [features]
 default = []
-sp1 = ["dep:sp1-sdk", "uni-evm-guest/sp1", "uni-sequencer/sp1"]
+sp1 = ["dep:sp1-sdk", "uni-sequencer/sp1"]
 
 [dev-dependencies]

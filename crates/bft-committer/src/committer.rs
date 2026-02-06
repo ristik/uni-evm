@@ -22,7 +22,7 @@ pub struct BftCommitterConfig {
     pub shard_id: Vec<u8>,
     pub node_id: String,
     pub signing_key: SecretKey,
-    pub root_chain_peer: PeerId,  // Primary root chain peer to send requests to
+    pub root_chain_peers: Vec<PeerId>,  // Root chain peers (first is primary, rest are failover)
 }
 
 /// BFT Core committer - handles L2→L1 block certification
@@ -188,16 +188,30 @@ impl BftCommitter {
 
         debug!("Signed certification request");
 
-        // Submit to BFT Core via libp2p (fire-and-forget)
-        self.bft_handle
-            .submit_certification_request(self.config.root_chain_peer, cert_request)
-            .await
-            .context("Failed to submit certification request to BFT Core")?;
-
-        info!(
-            "BlockCertification request submitted for block {} (round {})",
-            block_number, round_number
-        );
+        // Submit to BFT Core via libp2p - try each peer until one succeeds
+        let mut last_err = None;
+        for peer in &self.config.root_chain_peers {
+            match self.bft_handle
+                .submit_certification_request(*peer, cert_request.clone())
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        "BlockCertification request submitted for block {} (round {}) to peer {}",
+                        block_number, round_number, peer
+                    );
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    warn!("Failed to submit certification to peer {}: {}", peer, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e).context("Failed to submit certification request to any root chain peer");
+        }
 
         Ok(())
     }
@@ -393,13 +407,27 @@ impl BftCommitter {
         let signature = self.sign_request(&cert_request)?;
         cert_request.signature = Some(signature);
 
-        // Submit to BFT Core - it will reject and send genesis UC
-        self.bft_handle
-            .submit_certification_request(self.config.root_chain_peer, cert_request)
-            .await
-            .context("Failed to submit genesis sync probe to BFT Core")?;
-
-        info!("Genesis sync probe submitted - awaiting UC round 0 from BFT Core");
+        // Submit to BFT Core - try each peer until one succeeds
+        let mut last_err = None;
+        for peer in &self.config.root_chain_peers {
+            match self.bft_handle
+                .submit_certification_request(*peer, cert_request.clone())
+                .await
+            {
+                Ok(()) => {
+                    info!("Genesis sync probe submitted to peer {} - awaiting UC round 0", peer);
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    warn!("Failed to submit genesis probe to peer {}: {}", peer, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e).context("Failed to submit genesis sync probe to any root chain peer");
+        }
 
         Ok(())
     }
@@ -439,7 +467,7 @@ mod tests {
             shard_id: vec![1],
             node_id: "test-node".to_string(),
             signing_key: secret_key,
-            root_chain_peer: peer_id,
+            root_chain_peers: vec![peer_id],
         };
 
         assert_eq!(config.partition_id, 1);

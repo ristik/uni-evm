@@ -187,13 +187,14 @@ impl UniEvmNode {
         let bft_handle = bft_client.handle();
         let bft_peer_id = bft_client.local_peer_id();
 
-        let root_chain_peer = if let Some(peer_str) = self.config.bft_core.root_chain_peers.first() {
-            keys::parse_peer_id(peer_str)
-                .context(format!("Failed to parse root chain peer: {}", peer_str))?
-        } else {
-            warn!("No root chain peers configured");
-            PeerId::random()
-        };
+        let root_chain_peers: Vec<PeerId> = self.config.bft_core.root_chain_peers.iter()
+            .map(|peer_str| keys::parse_peer_id(peer_str)
+                .context(format!("Failed to parse root chain peer: {}", peer_str)))
+            .collect::<Result<Vec<_>>>()?;
+        if root_chain_peers.is_empty() {
+            return Err(anyhow::anyhow!("No root chain peers configured"));
+        }
+        info!("Configured {} root chain peers", root_chain_peers.len());
 
         // Set up UC+TechnicalRecord callback BEFORE spawning client
         // This callback will handle both genesis UC and regular UCs
@@ -487,7 +488,7 @@ impl UniEvmNode {
             shard_id: vec![self.config.network.shard_id as u8],
             node_id: self.config.network.node_id.clone(),  // Use BFT node ID from config, NOT libp2p peer ID
             signing_key,
-            root_chain_peer,
+            root_chain_peers: root_chain_peers.clone(),
         };
 
         // Track if we have a stored UC before moving it
@@ -506,20 +507,40 @@ impl UniEvmNode {
         info!("  Partition ID: {}", self.config.network.partition_id);
         info!("  BFT Node ID:  {}", self.config.network.node_id);
         info!("  libp2p Peer:  {}", bft_peer_id);
-        info!("  Root Peer:    {}", root_chain_peer);
+        info!("  Root Peers:   {:?}", root_chain_peers);
 
-        bft_handle
-            .send_handshake(
-                root_chain_peer,
-                self.config.network.partition_id,
-                self.config.network.node_id.clone(),  // Use BFT node ID, not libp2p peer ID
-            )
-            .await
-            .context("Failed to send handshake to BFT Core")?;
+        // Try each root peer until handshake succeeds (subscribe to one UC feed)
+        let mut handshake_ok = false;
+        for peer in &root_chain_peers {
+            info!("Trying handshake with root peer: {}", peer);
+            match bft_handle
+                .send_handshake(
+                    *peer,
+                    self.config.network.partition_id,
+                    self.config.network.node_id.clone(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    info!("Handshake sent to root peer: {}", peer);
+                    handshake_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!("Handshake failed with peer {}: {}, trying next...", peer, e);
+                }
+            }
+        }
+        if !handshake_ok {
+            return Err(anyhow::anyhow!("Failed to send handshake to any root chain peer"));
+        }
 
-        info!("✓ Handshake sent - waiting for UC feed subscription...");
+        info!("Handshake sent - waiting for UC feed subscription...");
 
         // Wait for first UC from subscription to arrive for synchronization
+        // This can be either:
+        // - Initial UC (empty hashes) - signals "certify genesis"
+        // - Regular UC (with state hash) - signals "sync to this state"
         const UC_SYNC_TIMEOUT_SECS: u64 = 30;
         info!("Waiting for first UC from BFT Core (up to {} seconds)...", UC_SYNC_TIMEOUT_SECS);
         let timeout = tokio::time::Duration::from_secs(UC_SYNC_TIMEOUT_SECS);
@@ -529,20 +550,13 @@ impl UniEvmNode {
         while start.elapsed() < timeout {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-            // Check if we have a last UC with VALID (non-null) state hash
+            // Check if we have received ANY UC from BFT Core
+            // Initial UCs have empty hashes - that's valid, it means "certify genesis"
             if let Some(committer_arc) = bft_committer_ref.lock().await.as_ref() {
                 if let Ok(committer) = committer_arc.try_lock() {
-                    if let Some(uc) = committer.round_state().get_last_uc() {
-                        // Verify UC has non-null state hash (not a sync UC)
-                        let has_valid_hash = uc.input_record.as_ref()
-                            .and_then(|ir| ir.hash.as_ref())
-                            .map(|h| !h.is_empty())
-                            .unwrap_or(false);
-
-                        if has_valid_hash {
-                            luc_received = true;
-                            break;
-                        }
+                    if committer.round_state().get_last_uc().is_some() {
+                        luc_received = true;
+                        break;
                     }
                 }
             }
@@ -550,7 +564,7 @@ impl UniEvmNode {
 
         if luc_received {
             // Get UC details for logging
-            let (uc_round, next_round) = if let Some(committer_arc) = bft_committer_ref.lock().await.as_ref() {
+            let (uc_round, next_round, is_initial) = if let Some(committer_arc) = bft_committer_ref.lock().await.as_ref() {
                 if let Ok(committer) = committer_arc.try_lock() {
                     let uc = committer.round_state().get_last_uc();
                     let uc_round = uc.as_ref()
@@ -558,14 +572,28 @@ impl UniEvmNode {
                         .map(|ir| ir.round_number)
                         .unwrap_or(0);
                     let next_round = committer.round_state().get_next_expected_round();
-                    (uc_round, next_round)
+                    // Check if this is an initial UC (empty hashes)
+                    let is_initial = uc.as_ref()
+                        .and_then(|u| u.input_record.as_ref())
+                        .map(|ir| {
+                            let hash_empty = ir.hash.as_ref().map_or(true, |h| h.is_empty());
+                            let prev_empty = ir.previous_hash.as_ref().map_or(true, |h| h.is_empty());
+                            hash_empty && prev_empty
+                        })
+                        .unwrap_or(false);
+                    (uc_round, next_round, is_initial)
                 } else {
-                    (0, 0)
+                    (0, 0, false)
                 }
             } else {
-                (0, 0)
+                (0, 0, false)
             };
-            info!("✓ Received UC from BFT Core: round {}, next expected round {}", uc_round, next_round);
+            if is_initial {
+                info!("✓ Received INITIAL UC from BFT Core (empty hashes - genesis not yet certified)");
+                info!("  Next expected round: {}", next_round);
+            } else {
+                info!("✓ Received UC from BFT Core: round {}, next expected round {}", uc_round, next_round);
+            }
         } else if !had_stored_uc {
             // No UC from storage AND no UC from BFT Core - cannot proceed
             error!("❌ Failed to receive Unicity Certificate from BFT Core within {} seconds", UC_SYNC_TIMEOUT_SECS);
@@ -748,7 +776,7 @@ impl UniEvmNode {
         // This maintains UC feed subscription even if BFT Core cannot dial back
         info!("STARTING PERIODIC HANDSHAKE TASK...");
         let bft_handle_for_heartbeat = bft_handle.clone();
-        let root_chain_peer_for_heartbeat = root_chain_peer;
+        let root_chain_peers_for_heartbeat = root_chain_peers.clone();
         let partition_id_for_heartbeat = self.config.network.partition_id;
         let node_id_for_heartbeat = self.config.network.node_id.clone();  // Use BFT node ID
         let handshake_interval_secs = 30*60;
@@ -767,12 +795,20 @@ impl UniEvmNode {
 
                 info!("Periodic handshake: Re-subscribing to UC feed");
 
-                if let Err(e) = bft_handle_for_heartbeat.send_handshake(
-                    root_chain_peer_for_heartbeat,
-                    partition_id_for_heartbeat,
-                    node_id_for_heartbeat.clone(),
-                ).await {
-                    warn!("Failed to send periodic handshake: {}", e);
+                for peer in &root_chain_peers_for_heartbeat {
+                    match bft_handle_for_heartbeat.send_handshake(
+                        *peer,
+                        partition_id_for_heartbeat,
+                        node_id_for_heartbeat.clone(),
+                    ).await {
+                        Ok(()) => {
+                            info!("Periodic handshake sent to peer: {}", peer);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Periodic handshake failed with peer {}: {}", peer, e);
+                        }
+                    }
                 }
             }
         });
